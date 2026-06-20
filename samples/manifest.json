@@ -1,0 +1,85 @@
+[
+  {
+    "clip_id": "fleurs_en_us_test_1904",
+    "audio": "samples/fleurs_en_us_test_1904.wav",
+    "gold": "However, due to the slow communication channels, styles in the west could lag behind by 25 to 30 year.",
+    "must_have": [
+      "However",
+      "communication",
+      "channels"
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "source": "google/fleurs"
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1675",
+    "audio": "samples/fleurs_en_us_test_1675.wav",
+    "gold": "All nouns, alongside the word Sie for you, always begin with a capital letter, even in the middle of a sentence.",
+    "must_have": [
+      "All",
+      "alongside",
+      "Sie",
+      "capital",
+      "sentence."
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "source": "google/fleurs"
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1950",
+    "audio": "samples/fleurs_en_us_test_1950.wav",
+    "gold": "To the north and within easy reach is the romantic and fascinating town of Sintra and which was made famous to foreigners after a glowing account of its splendours recorded by Lord Byron.",
+    "must_have": [
+      "romantic",
+      "fascinating",
+      "Sintra",
+      "foreigners",
+      "glowing",
+      "account",
+      "splendours",
+      "recorded",
+      "Lord",
+      "Byron."
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "source": "google/fleurs"
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+    "audio": "samples/openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000.wav",
+    "gold": "लिबर ऑफिस impress में एक प्रस्तुति document बनाना और बुनियादी formatting के इस spoken tutorial में आपका स्वागत है",
+    "must_have": [
+      "impress",
+      "document",
+      "formatting",
+      "tutorial"
+    ],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "source": "openslr104"
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001",
+    "audio": "samples/openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0001.wav",
+    "gold": "इस tutorial में हम impress window के भागों के बारे में सीखेंगे और कैसे स्लाइड इन्सर्ट करें और कॉपी करें फॉन्ट तथा फॉन्ट को फॉर्मेट करना सीखेंगे",
+    "must_have": [
+      "tutorial",
+      "impress"
+    ],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "source": "openslr104"
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0002",
+    "audio": "samples/openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0002.wav",
+    "gold": "यहाँ हम अपने ऑपरेटिंग सिस्टम के रूप में gnu/linux और लिबरऑफिस वर्जन 334 का उपयोग कर रहे हैं",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "source": "openslr104"
+  }
+]

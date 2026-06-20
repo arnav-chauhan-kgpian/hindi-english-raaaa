@@ -1,0 +1,398 @@
+[
+  {
+    "clip_id": "fleurs_en_us_test_1674",
+    "gold": "In some areas boiling water for a minute is enough, in others several minutes are needed.",
+    "must_have": [
+      "boiling",
+      "several",
+      "minutes",
+      "needed."
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "en_us",
+      "split": "test",
+      "id": "fleurs_en_us_test_1674",
+      "source_audio": "fleurs_en_us_test_1674.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1728",
+    "gold": "The cabbage juice changes color depending on how acidic or basic (alkaline) the chemical is.",
+    "must_have": [
+      "cabbage",
+      "changes",
+      "depending",
+      "alkaline",
+      "chemical"
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "en_us",
+      "split": "test",
+      "id": "fleurs_en_us_test_1728",
+      "source_audio": "fleurs_en_us_test_1728.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1802",
+    "gold": "The Internet combines elements of both mass and interpersonal communication.",
+    "must_have": [
+      "Internet",
+      "combines",
+      "elements",
+      "interpersonal",
+      "communication."
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "en_us",
+      "split": "test",
+      "id": "fleurs_en_us_test_1802",
+      "source_audio": "fleurs_en_us_test_1802.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1904",
+    "gold": "However, due to the slow communication channels, styles in the west could lag behind by 25 to 30 year.",
+    "must_have": [
+      "However",
+      "communication",
+      "channels"
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "en_us",
+      "split": "test",
+      "id": "fleurs_en_us_test_1904",
+      "source_audio": "fleurs_en_us_test_1904.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_en_us_test_1952",
+    "gold": "Anyone who's going to drive at high latitudes or over mountain passes should consider the possibility of snow, ice, or freezing temperatures.",
+    "must_have": [
+      "Anyone",
+      "latitudes",
+      "mountain",
+      "consider",
+      "possibility",
+      "freezing",
+      "temperatures."
+    ],
+    "language": "English",
+    "category": "fleurs_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "en_us",
+      "split": "test",
+      "id": "fleurs_en_us_test_1952",
+      "source_audio": "fleurs_en_us_test_1952.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_hi_in_test_1666",
+    "gold": "अपनी सरकार के अलावा आप अन्य देशों की सरकारों की सलाह ले सकते हैं. हालाँकि, उनकी सलाह उनके नागरिकों को ध्यान में रखकर दी जाती हैं.",
+    "must_have": [],
+    "language": "Hindi",
+    "category": "fleurs_hindi",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "hi_in",
+      "split": "test",
+      "id": "fleurs_hi_in_test_1666",
+      "source_audio": "fleurs_hi_in_test_1666.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_hi_in_test_1718",
+    "gold": "ऐसी कोई वैश्विक परिभाषा नहीं है जिसके लिए निर्मित सामान एंटीक होते हैं. कुछ कर एजेंसियाँ 100 साल से पुराने सामान को एंटीक के तौर पर परिभाषित करती हैं.",
+    "must_have": [],
+    "language": "Hindi",
+    "category": "fleurs_hindi",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "hi_in",
+      "split": "test",
+      "id": "fleurs_hi_in_test_1718",
+      "source_audio": "fleurs_hi_in_test_1718.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_hi_in_test_1778",
+    "gold": "टेलीविजन रिपोर्टों में प्लांट से निकलने वाला सफेद धुआँ दिखाया गया है।",
+    "must_have": [],
+    "language": "Hindi",
+    "category": "fleurs_hindi",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "hi_in",
+      "split": "test",
+      "id": "fleurs_hi_in_test_1778",
+      "source_audio": "fleurs_hi_in_test_1778.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_hi_in_test_1827",
+    "gold": "सबसे नज़दीकी सिरे पर क्रस्ट की मोटाई करीब 70 किलोमीटर है और सबसे दूर के सिरे पर यह 100 किलोमीटर है.",
+    "must_have": [],
+    "language": "Hindi",
+    "category": "fleurs_hindi",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "hi_in",
+      "split": "test",
+      "id": "fleurs_hi_in_test_1827",
+      "source_audio": "fleurs_hi_in_test_1827.wav"
+    }
+  },
+  {
+    "clip_id": "fleurs_hi_in_test_1981",
+    "gold": "यदि आप केवल शिपबोर्ड भ्रमण का उपयोग करके किनारे तक जाते हैं तो आपको एक अलग वीज़ा की आवश्यकता नहीं होगी (2009 तक).",
+    "must_have": [],
+    "language": "Hindi",
+    "category": "fleurs_hindi",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "google/fleurs",
+      "config": "hi_in",
+      "split": "test",
+      "id": "fleurs_hi_in_test_1981",
+      "source_audio": "fleurs_hi_in_test_1981.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+    "gold": "लिबर ऑफिस impress में एक प्रस्तुति document बनाना और बुनियादी formatting के इस spoken tutorial में आपका स्वागत है",
+    "must_have": [
+      "impress",
+      "document",
+      "formatting",
+      "tutorial"
+    ],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0000.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0005",
+    "gold": "मध्य में हम खाली जगह देखते है जोकि workspace है जहाँ हम काम करेंगे",
+    "must_have": [
+      "workspace"
+    ],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0005",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0005.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0010",
+    "gold": "notes view प्रत्येक slide में notes जोड़ने की सुविधा देता है जोकि प्रस्तुतिकरण के वक्त नज़र नहीं the",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0010",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0010.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0015",
+    "gold": "screen की बाईं ओर आप slides pane देखते हैं यह प्रस्तुति में slides के थम्बनेल सम्मिलित करता है",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0015",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0015.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0020",
+    "gold": "चलिए अब सीखते हैं कि कैसे slide को insert करें यानि जोड़ें slides pane में दूसरी slide पर क्लिक करके उसे चुनें",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0020",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0020.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0025",
+    "gold": "अतः शीर्षक इस तरह से जोड़ सकते हैं",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0025",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0025.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0030",
+    "gold": "अब सातवीं स्लाइड को कॉपी करें स्लाइड पर राइट क्लिक करें और कांटेक्स्ट मेन्यू से copy चुनें",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0030",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0030.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0035",
+    "gold": "long term goal नामक slide पर double क्लिक करके उसे चुनते हैं",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0035",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0035.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0040",
+    "gold": "और font size को 32 से 40 में बदलें",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0040",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0040.wav"
+    }
+  },
+  {
+    "clip_id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0045",
+    "gold": "इस डायलॉग बॉक्स को बंद करते हैं",
+    "must_have": [],
+    "language": "hi-en",
+    "category": "openslr104_hinglish",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0045",
+      "source_audio": "openslr104_hi_en_103085_w5Jyq3XMbb3WwiKQ_0045.wav"
+    }
+  },
+  {
+    "clip_id": "yt_australia_hugh_jackman",
+    "gold": "I'm not sure which. 'From the time you were little, people have smiled you into smiling. People have talked you into talking, sung you into singing, loved you into loving. People have helped you all along the way. Some of them may be right here,",
+    "must_have": [],
+    "language": "",
+    "category": "youtube_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "yt_australia_hugh_jackman",
+      "source_audio": "australia_hugh_jackman.wav"
+    }
+  },
+  {
+    "clip_id": "yt_india_anand_mahindra",
+    "gold": "above but I'm not here to try and dispense any unique wisdom as the proverbial school girl wrote Socrates was a wise Greek philosopher and he went around dispensing gratuitous advice and they poisoned him so I deeply fear that fate so what I will do is to just throw some ideas at",
+    "must_have": [],
+    "language": "",
+    "category": "youtube_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "yt_india_anand_mahindra",
+      "source_audio": "india_anand_mahindra.wav"
+    }
+  },
+  {
+    "clip_id": "yt_israel_yuval_noah_harari",
+    "gold": "How did we turn ourselves from insignificant apes minding their own business in a corner of Africa into the rulers of planet Earth? Usually we look for the difference between us and all the other animals on the individual level. We want to believe I want to believe that there is",
+    "must_have": [],
+    "language": "",
+    "category": "youtube_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "yt_israel_yuval_noah_harari",
+      "source_audio": "israel_yuval_noah_harari.wav"
+    }
+  },
+  {
+    "clip_id": "yt_uk_stephen_fry",
+    "gold": "of Injustice and pain that's what I would say and you think you're going to get in on that no but I wouldn't want to I wouldn't want to get in on his terms they're wrong now if I died and it was it was Pluto Hades and if it was the 12 Greek gods then I would have more truck with it because the Greeks were they didn't pretend not",
+    "must_have": [],
+    "language": "",
+    "category": "youtube_english",
+    "trust": "silver",
+    "audio_ref": {
+      "repo": "",
+      "config": "",
+      "split": "",
+      "id": "yt_uk_stephen_fry",
+      "source_audio": "uk_stephen_fry.wav"
+    }
+  }
+]

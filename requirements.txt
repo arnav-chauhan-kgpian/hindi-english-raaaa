@@ -1,0 +1,10 @@
+# Local ASR engines for the submission (all local, no cloud at scoring).
+faster-whisper>=1.0        # fast foreground recognizer (English / Indian-English), CPU int8
+# Hinglish / code-switch path — moorlee/qwen3-asr-0.6b-hinglish (Apache-2.0, 0.6B, CPU):
+qwen-asr==0.0.6            # provides Qwen3ASRModel; loads the model below
+transformers>=4.46         # required by qwen-asr
+torch>=2.2                 # CPU build is fine (pip install torch); needed by qwen-asr
+accelerate>=0.30           # model loading helper for transformers
+# Audio I/O + (optional) corpus fetch:
+soundfile>=0.12
+datasets>=2.18            # used by scripts/fetch_audio.py on the Action, not at scoring time
