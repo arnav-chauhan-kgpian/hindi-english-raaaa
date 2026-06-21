@@ -64,17 +64,54 @@ def step1_install_and_gpu() -> dict:
         print("torch already present:", torch.__version__)
     except Exception:
         _sh(f"{sys.executable} -m pip install -q torch")
-    for pkg in ("qwen-asr[vllm]", "faster-whisper", "ctranslate2",
+    # qwen-asr WITHOUT [vllm] by default: vLLM pins a different torch, which leaves Kaggle's
+    # torchvision ABI-mismatched -> "operator torchvision::nms does not exist" and Qwen fails
+    # to load. The transformers GPU backend (bf16/fp16) loads cleanly and is faithful. Opt into
+    # vLLM with STT_USE_VLLM=1 only after pinning a matching torch/torchvision/torchaudio trio.
+    use_vllm = os.environ.get("STT_USE_VLLM", "0") == "1"
+    qwen_pkg = "qwen-asr[vllm]" if use_vllm else "qwen-asr"
+    for pkg in (qwen_pkg, "faster-whisper", "ctranslate2",
                 "transformers", "accelerate", "psutil"):
         print(f"pip install {pkg} ...")
         _sh(f"{sys.executable} -m pip install -q {pkg}")
-    # flash-attn is OPTIONAL — the loader falls back to sdpa if it's missing. Its build is
-    # slow and may fail on Kaggle; attempt best-effort and never block the run.
-    print("pip install flash-attn (optional, best-effort) ...")
-    _sh(f"{sys.executable} -m pip install -q flash-attn --no-build-isolation")
+
+    # Guard the torchvision::nms ABI (transformers imports torchvision during model load).
+    try:
+        from torchvision.ops import nms  # noqa: F401
+        print("torchvision ABI ok")
+    except Exception as e:
+        print("WARNING: torchvision ABI mismatch (", e, ")")
+        print("  -> set STT_USE_VLLM=0 (default) so torch is not upgraded, then 'Restart & Run All'.")
 
     import torch
     info = {"cuda": torch.cuda.is_available()}
+    # flash-attn is OPTIONAL and its build takes ~30+ min. It's only useful on Ampere+
+    # (bf16-capable) GPUs; on T4/Turing FA2 is unsupported and the loader uses sdpa anyway.
+    # So only attempt the build when it can actually help (skip via STT_SKIP_FLASH_ATTN=1).
+    if (info["cuda"] and torch.cuda.is_bf16_supported()
+            and os.environ.get("STT_SKIP_FLASH_ATTN") != "1"):
+        print("pip install flash-attn (Ampere+ detected; best-effort) ...")
+        _sh(f"{sys.executable} -m pip install -q flash-attn --no-build-isolation")
+    else:
+        print("skipping flash-attn build (not Ampere+ / not useful here -> sdpa is used)")
+
+    # faster-whisper (ctranslate2) GPU needs cuBLAS + cuDNN discoverable; without them ct2
+    # SILENTLY runs on CPU (the FAST p50~7s bug while Qwen is on GPU). Install + expose libs.
+    if info["cuda"]:
+        for w in ("nvidia-cublas-cu12", "nvidia-cudnn-cu12"):
+            _sh(f"{sys.executable} -m pip install -q {w}")
+        libs = []
+        for mod in ("nvidia.cublas", "nvidia.cudnn"):
+            try:
+                m = __import__(mod, fromlist=["lib"])
+                d = os.path.join(os.path.dirname(m.__file__), "lib")
+                if os.path.isdir(d):
+                    libs.append(d)
+            except Exception:
+                pass
+        if libs:
+            os.environ["LD_LIBRARY_PATH"] = ":".join(libs + [os.environ.get("LD_LIBRARY_PATH", "")])
+            print("LD_LIBRARY_PATH += cuBLAS/cuDNN for ctranslate2 GPU ->", libs)
     if not info["cuda"]:
         info.update(gpu="(NO GPU)", cuda_version=None, vram_gb=0.0, bf16=False)
         print("\n*** NO CUDA GPU DETECTED — enable the Kaggle GPU accelerator and re-run. ***")
@@ -107,7 +144,11 @@ def find_repo() -> str:
     env = os.environ.get("BUILDERR_REPO")
     if env:
         cand.append(env)
-    cand += [os.getcwd(), os.path.dirname(os.path.abspath(__file__))]
+    cand.append(os.getcwd())
+    try:                                  # __file__ is undefined in a notebook kernel
+        cand.append(os.path.dirname(os.path.abspath(__file__)))
+    except NameError:
+        pass
     for root in ("/kaggle/input", "/kaggle/working", os.getcwd()):
         if os.path.isdir(root):
             for dp, _, fs in os.walk(root):
@@ -161,6 +202,10 @@ def step2_warmup_offline(T, repo, clips):
     print(f"hinglish loaded    : {hm is not None}  ({hing_load:.1f}s)  "
           f"backend={dict(T._HINGLISH_META).get('backend')} "
           f"precision={dict(T._HINGLISH_META).get('precision')}")
+    fm_meta = dict(T._FAST_META)
+    print(f"FAST model device  : {fm_meta.get('device')} / compute={fm_meta.get('compute_type')}  "
+          f"(if 'cpu' here, that's the latency bug)")
+    print(f"HINGLISH device    : {dict(T._HINGLISH_META).get('device')}")
     if hm is None:
         print("*** HINGLISH MODEL DID NOT LOAD ***  error:", T._LAST_HINGLISH_ERROR)
 
@@ -219,6 +264,7 @@ def step3_model_bench(T, SC, clips):
         audio = T.load_audio(c["wav"])
         s = time.time(); r = T.fast_transcribe(audio); lat.append((time.time() - s) * 1000)
         wers.append(SC.wer(c["gold"], r["text"])); means.append(SC.judge_meaning(c["gold"], r["text"]))
+        print(f"  FAST  {c['id'][:32]:32s} {lat[-1]:7.0f} ms")
     out["fast"] = {"wer": _mean(wers), "meaning": _mean(means), "avg": _mean(lat),
                    "p50": _pct(lat, .50), "p95": _pct(lat, .95)}
 
@@ -233,6 +279,7 @@ def step3_model_bench(T, SC, clips):
         audio = T.load_audio(c["wav"])
         s = time.time(); r = T.hinglish_transcribe(audio); lat.append((time.time() - s) * 1000)
         wers.append(SC.wer(c["gold"], r["text"])); means.append(SC.judge_meaning(c["gold"], r["text"]))
+        print(f"  HING  {c['id'][:32]:32s} {lat[-1]:7.0f} ms")
     out["hing"] = {"wer": _mean(wers), "meaning": _mean(means), "avg": _mean(lat),
                    "p50": _pct(lat, .50), "p95": _pct(lat, .95), "vram_mb": _vram_mb()}
     print(f"FAST   p50={_fmt(out['fast']['p50'],'ms')} p95={_fmt(out['fast']['p95'],'ms')} "
@@ -255,6 +302,8 @@ def step4_full_pipeline(T, SC, clips):
     for c in clips:
         s = time.time(); r = T.transcribe(c["wav"], "auto"); dt = (time.time() - s) * 1000
         lat.append(dt)
+        print(f"  FULL  {c['id'][:32]:32s} {dt:7.0f} ms  mode={r.get('mode_used')} "
+              f"asr={r.get('timings_ms',{}).get('asr')}ms")
         txt = (r.get("text") or "").strip()
         if not txt:
             blanks += 1

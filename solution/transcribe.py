@@ -243,21 +243,27 @@ def _load_faster_whisper(model_name: str, meta: Optional[dict] = None) -> Any:
     allow_dl = _downloads_allowed()
     # local cache first; only add the download attempt when it's genuinely allowed
     local_only_opts = (True, False) if allow_dl else (True,)
-    _log(f"faster-whisper '{model_name}': downloads_allowed={allow_dl} "
+    # Run the fast model on the GPU when one is present (sub-second). Try CUDA first, then
+    # FALL BACK to CPU int8 (so a missing cuDNN never makes the fast model fail to load).
+    attempts = []
+    if _gpu_available():
+        attempts += [("cuda", "int8_float16"), ("cuda", "float16")]
+    attempts += [("cpu", "int8"), ("cpu", "int8_float32"), ("cpu", "float32")]
+    _log(f"faster-whisper '{model_name}': attempts={attempts} downloads_allowed={allow_dl} "
          f"local_only_opts={local_only_opts} cache={_hf_cache_dir()}")
     for local_only in local_only_opts:
-        for compute_type in ("int8", "int8_float32", "float32"):
+        for device, compute_type in attempts:
             try:
                 m = WhisperModel(
                     model_name,
-                    device="cpu",
+                    device=device,
                     compute_type=compute_type,
                     cpu_threads=threads,
                     num_workers=1,
                     local_files_only=local_only,
                 )
                 if meta is not None:
-                    meta.update(model=model_name, compute_type=compute_type, device="cpu",
+                    meta.update(model=model_name, compute_type=compute_type, device=device,
                                 local_files_only=local_only, cache=_hf_cache_dir())
                 _log(f"faster-whisper '{model_name}' LOADED "
                      f"(compute_type={compute_type}, local_files_only={local_only})")
@@ -858,6 +864,15 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
             load_kwargs.pop("local_files_only", None)
             model = Qwen3ASRModel.from_pretrained(HINGLISH_QWEN_NAME, **load_kwargs)
         load_ms = round((time.time() - t0) * 1000)
+        # anti-runaway: stop degenerate repetition loops that otherwise generate all the way
+        # to max_new_tokens (~80s on the T4 transformers backend). Mild, quality-safe.
+        try:
+            _gc = getattr(getattr(model, "model", None), "generation_config", None)
+            if _gc is not None:
+                _gc.no_repeat_ngram_size = 3
+                _gc.repetition_penalty = 1.15
+        except Exception:
+            pass
         quant = _quantize_cpu(model) if not on_gpu else "off(gpu-bf16)"
 
         if meta is not None:
