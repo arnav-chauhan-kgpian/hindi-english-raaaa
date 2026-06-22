@@ -1,4 +1,4 @@
-# Builderr Speech-to-Text — Local Hinglish Dictation Engine
+# arnav's Speech-to-Text — Local Hinglish Dictation Engine
 
 A local, offline speech-to-text engine for English, Indian-English, and Hindi-English
 (code-switch) work dictation. It preserves the code-switch faithfully — Hindi stays in
