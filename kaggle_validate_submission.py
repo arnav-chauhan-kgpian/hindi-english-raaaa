@@ -58,20 +58,33 @@ def step1_install_and_gpu() -> dict:
     print("=" * 60)
     print("STEP 1 — install dependencies + detect GPU")
     print("=" * 60)
-    # torch ships with the Kaggle GPU image; do NOT reinstall it (avoids CUDA breakage).
-    try:
-        import torch  # noqa: F401
-        print("torch already present:", torch.__version__)
-    except Exception:
-        _sh(f"{sys.executable} -m pip install -q torch")
-    # qwen-asr WITHOUT [vllm] by default: vLLM pins a different torch, which leaves Kaggle's
-    # torchvision ABI-mismatched -> "operator torchvision::nms does not exist" and Qwen fails
-    # to load. The transformers GPU backend (bf16/fp16) loads cleanly and is faithful. Opt into
-    # vLLM with STT_USE_VLLM=1 only after pinning a matching torch/torchvision/torchaudio trio.
-    use_vllm = os.environ.get("STT_USE_VLLM", "0") == "1"
-    qwen_pkg = "qwen-asr[vllm]" if use_vllm else "qwen-asr"
-    for pkg in (qwen_pkg, "faster-whisper", "ctranslate2",
-                "transformers", "accelerate", "psutil"):
+    # ---- Option 2: vLLM backend (the locked architecture; ~0.02s/token -> p95 < 5s). ----
+    # vLLM needs a torch it supports, so qwen-asr[vllm] DOWNGRADES Kaggle's torch (2.10) to
+    # vLLM's pin. We then reinstall a MATCHING torchvision/torchaudio so the
+    # "operator torchvision::nms does not exist" ABI error cannot happen.
+    # IMPORTANT: do NOT import torch before this install, or the old (2.10) module is cached.
+    # Fallback to transformers backend with STT_USE_VLLM=0.
+    use_vllm = os.environ.get("STT_USE_VLLM", "1") == "1"
+    if use_vllm:
+        print("pip install qwen-asr[vllm]  (pulls vLLM + its torch; downgrades torch) ...")
+        _sh(f'{sys.executable} -m pip install -q "qwen-asr[vllm]"')
+        import torch  # FIRST torch import -> the downgraded version vLLM installed
+        tver = torch.__version__.split("+")[0]                      # e.g. 2.6.0
+        tv_minor = int(tver.split(".")[1]) + 15                     # torch 2.6 -> torchvision 0.21
+        cu = (torch.version.cuda or "12.4").replace(".", "")[:3]    # "124"
+        print(f"matching torchvision/torchaudio to torch {tver} (cu{cu}) ...")
+        _sh(f'{sys.executable} -m pip install -q --no-deps --force-reinstall '
+            f'"torchvision==0.{tv_minor}.*" "torchaudio=={tver}" '
+            f'--index-url https://download.pytorch.org/whl/cu{cu}')
+    else:
+        try:
+            import torch  # noqa: F401
+            print("torch already present:", torch.__version__)
+        except Exception:
+            _sh(f"{sys.executable} -m pip install -q torch")
+        _sh(f"{sys.executable} -m pip install -q qwen-asr")
+
+    for pkg in ("faster-whisper", "ctranslate2", "transformers", "accelerate", "psutil"):
         print(f"pip install {pkg} ...")
         _sh(f"{sys.executable} -m pip install -q {pkg}")
 
@@ -80,20 +93,18 @@ def step1_install_and_gpu() -> dict:
         from torchvision.ops import nms  # noqa: F401
         print("torchvision ABI ok")
     except Exception as e:
-        print("WARNING: torchvision ABI mismatch (", e, ")")
-        print("  -> set STT_USE_VLLM=0 (default) so torch is not upgraded, then 'Restart & Run All'.")
+        print("WARNING: torchvision ABI mismatch (", e, ") -> 'Restart & Run All' may be needed")
 
     import torch
     info = {"cuda": torch.cuda.is_available()}
-    # flash-attn is OPTIONAL and its build takes ~30+ min. It's only useful on Ampere+
-    # (bf16-capable) GPUs; on T4/Turing FA2 is unsupported and the loader uses sdpa anyway.
-    # So only attempt the build when it can actually help (skip via STT_SKIP_FLASH_ATTN=1).
-    if (info["cuda"] and torch.cuda.is_bf16_supported()
-            and os.environ.get("STT_SKIP_FLASH_ATTN") != "1"):
-        print("pip install flash-attn (Ampere+ detected; best-effort) ...")
+    # flash-attn: SKIP by default (vLLM has its own kernels; the T4 build fails anyway and
+    # the loader uses sdpa). Opt in with STT_BUILD_FLASH_ATTN=1.
+    if (os.environ.get("STT_BUILD_FLASH_ATTN") == "1" and info["cuda"]
+            and torch.cuda.is_bf16_supported()):
+        print("pip install flash-attn (opt-in) ...")
         _sh(f"{sys.executable} -m pip install -q flash-attn --no-build-isolation")
     else:
-        print("skipping flash-attn build (not Ampere+ / not useful here -> sdpa is used)")
+        print("skipping flash-attn (vLLM/sdpa used)")
 
     # faster-whisper (ctranslate2) GPU needs cuBLAS + cuDNN discoverable; without them ct2
     # SILENTLY runs on CPU (the FAST p50~7s bug while Qwen is on GPU). Install + expose libs.

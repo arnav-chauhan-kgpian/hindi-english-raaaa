@@ -827,6 +827,9 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
         # ---- FASTEST: vLLM backend (GPU only). Same model + same .transcribe() API. ----
         if on_gpu and backend_pref in ("auto", "vllm"):
             try:
+                # Triton attention works across GPUs (incl. pre-Ampere T4); vLLM's default
+                # FlashInfer needs a JIT build that fails on some boxes (ld: -lcuda). Overridable.
+                os.environ.setdefault("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
                 import vllm  # noqa: F401
                 t0 = time.time()
                 vmodel = Qwen3ASRModel.LLM(
