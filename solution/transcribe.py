@@ -870,7 +870,7 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
             _gc = getattr(getattr(model, "model", None), "generation_config", None)
             if _gc is not None:
                 _gc.no_repeat_ngram_size = 3
-                _gc.repetition_penalty = 1.15
+                _gc.repetition_penalty = 1.3   # stronger: kills residual repetition loops
         except Exception:
             pass
         quant = _quantize_cpu(model) if not on_gpu else "off(gpu-bf16)"
