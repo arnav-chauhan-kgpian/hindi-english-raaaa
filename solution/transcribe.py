@@ -2,9 +2,9 @@
 
 Architecture (all inside this single file, fully local, no cloud at scoring):
 
-    audio ─► preprocess ─► fast ASR (faster-whisper small, multilingual)
-          ─► router ─► [escalate?] ─► Hinglish ASR (Qwen3-ASR / large-v3 fallback)
-          ─► finalizer (faithful, no translation, repetition + blank guards)
+    audio ─► preprocess ─► fast ASR (faster-whisper-small-int8, GPU)
+          ─► recall router ─► [escalate?] ─► Hinglish ASR (Qwen3-ASR 0.6B, GPU vLLM/Triton)
+          ─► finalizer (faithful, no translation/romanization; repetition + blank guards)
           ─► JSON contract
 
 Contract (REQUIRED — checked by the harness):
@@ -54,11 +54,9 @@ AudioInput = Union["Any", str]
 # --- model identifiers (surfaced in model_ids / raw_candidates for auditability)
 FAST_MODEL_ID = "faster-whisper-small-int8"
 HINGLISH_QWEN_ID = "qwen3-asr-0.6b-hinglish"
-HINGLISH_FALLBACK_ID = "faster-whisper-large-v3-int8"
 
 FAST_MODEL_NAME = "small"
 HINGLISH_QWEN_NAME = "moorlee/qwen3-asr-0.6b-hinglish"
-HINGLISH_FALLBACK_NAME = "large-v3"
 
 # Generation cap for Qwen3-ASR. Decode is ~95% of latency and ~linear in tokens; typical
 # dictation clips stop at EOS well under this, so 256 is quality-safe and only bounds
@@ -68,26 +66,19 @@ QWEN_MAX_NEW_TOKENS = int(os.environ.get("STT_QWEN_MAX_NEW_TOKENS", "256"))
 
 TARGET_SR = 16000
 
-# --- integration: ensemble + vocab modules (optional; graceful if absent) ----
-try:
-    from solution import ensemble as _ensemble
-except Exception:  # pragma: no cover - package-relative fallback
-    try:
-        from . import ensemble as _ensemble
-    except Exception:
-        _ensemble = None
+# --- vocab module (tech-term normalization + ASR repair); graceful if absent ----
 try:
     from solution import vocab as _vocab
-except Exception:  # pragma: no cover
+except Exception:  # pragma: no cover - package-relative fallback
     try:
         from . import vocab as _vocab
     except Exception:
         _vocab = None
 
-# --- ABLATION FLAGS (toggle pipeline stages; driven by run_ablation in benchmark.py) ----
+# --- pipeline stage flags (FROZEN for submission) ----
 ENABLE_ROUTER = True       # route English vs escalate (should_escalate)
 ENABLE_HINGLISH = True     # run the Hinglish ASR on escalated clips
-ENABLE_ENSEMBLE = False    # PERMANENTLY DISABLED per spec — ensemble merge is removed
+ENABLE_ENSEMBLE = False    # PERMANENTLY DISABLED — ensemble merge removed (do not enable)
 ENABLE_VOCAB = True        # apply vocab.normalize_tech_words to the final text
 ENABLE_REPAIR = True       # apply vocab.repair_common_asr_errors to the final text
 
@@ -187,37 +178,6 @@ def _load_timeout() -> Optional[float]:
     """No cap when a download is expected (legit and slow); a hard cap otherwise so an
     offline/blocked load with a partial cache fails fast instead of hanging."""
     return None if _downloads_allowed() else 15.0
-
-
-def _force_hf_offline(flag: bool):
-    """Set HuggingFace offline mode via env AND the in-memory constant (which hf_hub
-    reads at import, so env alone is ignored once imported). Returns a restore callable.
-    With flag=True a missing/partial cache fails FAST instead of retrying the network."""
-    val = "1" if flag else "0"
-    saved_env = (os.environ.get("HF_HUB_OFFLINE"), os.environ.get("TRANSFORMERS_OFFLINE"))
-    os.environ["HF_HUB_OFFLINE"] = val
-    os.environ["TRANSFORMERS_OFFLINE"] = val
-    touched = []
-    try:
-        import huggingface_hub.constants as _hc
-        touched.append((_hc, "HF_HUB_OFFLINE", getattr(_hc, "HF_HUB_OFFLINE", None)))
-        _hc.HF_HUB_OFFLINE = bool(flag)
-    except Exception:
-        pass
-
-    def _restore() -> None:
-        for mod, attr, prev in touched:
-            try:
-                setattr(mod, attr, prev)
-            except Exception:
-                pass
-        for key, prev in zip(("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE"), saved_env):
-            if prev is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = prev
-
-    return _restore
 
 
 def _downloads_allowed() -> bool:
@@ -731,7 +691,7 @@ def route(
 
 
 # =============================================================================
-# PART 6 — Hinglish model loader (Qwen3-ASR primary, large-v3 fallback)
+# PART 6 — Hinglish model loader (Qwen3-ASR 0.6B; GPU vLLM, transformers fallback)
 # =============================================================================
 class _HinglishHandle:
     """Wraps whichever Hinglish-capable engine actually loaded."""
@@ -755,47 +715,11 @@ def _model_footprint_mb(model: Any):
     return None
 
 
-def _quantize_cpu(model: Any) -> str:
-    """Quantization policy for the Hinglish model.
-
-    MEASURED on this model (Qwen3-ASR 0.6B, CPU):
-      * 4-bit/8-bit via bitsandbytes — GPU-only, not usable on the CPU scoring box.
-      * torch dynamic int8 — fast (5s) & tiny (639MB) BUT corrupts generation to garbage
-        ('原句:'), so it breaks faithfulness. Default OFF.
-      * fp32 — correct & faithful, 3.1GB (< 5GB footprint gate). This is the default.
-    Set STT_QWEN_QUANT=int8 to opt into the (broken-output) dynamic int8 path anyway."""
-    try:
-        import torch
-        import torch.nn as nn
-        if os.environ.get("STT_QWEN_QUANT", "off") != "int8":
-            return "off(fp32)"
-        if torch.cuda.is_available():
-            return "skipped(cuda; load 4-bit bnb separately on GPU)"
-        import torch.ao.quantization as Q
-        # find the actual nn.Module to quantize (model.LLM is a method, not a module)
-        target = model if isinstance(model, nn.Module) else None
-        if target is None:
-            best, best_n = None, 0
-            for v in vars(model).values():
-                if isinstance(v, nn.Module):
-                    n = sum(p.numel() for p in v.parameters())
-                    if n > best_n:
-                        best, best_n = v, n
-            target = best
-        if target is None:
-            return "off(no nn.Module found)"
-        Q.quantize_dynamic(target, {nn.Linear}, dtype=torch.qint8, inplace=True)
-        return "cpu-dynamic-int8"
-    except Exception as e:  # noqa: BLE001
-        _log(f"quantization skipped: {type(e).__name__}: {e}")
-        return "off(fp32)"
-
-
 def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle]:
-    """Load the permissive, code-switch-trained Qwen3-ASR model via the official
-    ``qwen-asr`` package (Apache-2.0, CPU-runnable). Local cache first; downloads ONCE
-    when ``_downloads_allowed`` then loads offline forever. Returns ``None`` on failure
-    (no large-v3 fallback — it was too slow/inaccurate and has been removed)."""
+    """Load the code-switch Qwen3-ASR model via the official ``qwen-asr`` package
+    (Apache-2.0). GPU only (gated by get_hinglish_model). Prefers the vLLM backend,
+    falling back to transformers bf16/fp16. Local cache first; downloads ONCE when
+    ``_downloads_allowed`` then loads offline forever. Returns ``None`` on failure."""
     global _LAST_HINGLISH_ERROR
     try:
         cached = False
@@ -816,10 +740,6 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
         # NOTE: do NOT force HF_HUB_OFFLINE=1 — qwen-asr makes an API call that raises
         # OfflineModeIsEnabled under forced offline. local_files_only=True is the correct
         # offline switch: it uses the cache and skips the network.
-        # GPU-aware load (CPU path unchanged). On CUDA the SAME model runs in bf16 with
-        # FlashAttention-2 when available → ~sub-second–2s (the latency win lives on GPU,
-        # not CPU). For the fastest serving use the vLLM backend instead (see README/deploy):
-        #   Qwen3ASRModel.LLM(name, gpu_memory_utilization=0.85, max_inference_batch_size=32)
         import torch
         on_gpu = torch.cuda.is_available()
         backend_pref = os.environ.get("STT_QWEN_BACKEND", "auto")  # auto | vllm | transformers
@@ -876,7 +796,7 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
                 _gc.repetition_penalty = 1.3   # stronger: kills residual repetition loops
         except Exception:
             pass
-        quant = _quantize_cpu(model) if not on_gpu else "off(gpu-bf16)"
+        quant = "off(gpu-bf16)"
 
         if meta is not None:
             meta.update(model=HINGLISH_QWEN_NAME, kind="qwen-asr", backend="transformers",
@@ -896,9 +816,8 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
 
 def get_hinglish_model() -> Optional[_HinglishHandle]:
     """Return the resident Hinglish recognizer: ``moorlee/qwen3-asr-0.6b-hinglish`` via the
-    qwen-asr package (Apache-2.0, CPU, code-switch-faithful). Loaded once, cached at module
-    scope. ``None`` on failure — the large-v3 fallback was REMOVED (158s, hallucinated Urdu,
-    Devanagari-ized English terms); escalated clips then just keep the fast English draft."""
+    qwen-asr package (Apache-2.0, code-switch-faithful, GPU only). Loaded once, cached at
+    module scope. ``None`` on failure — escalated clips then keep the fast English draft."""
     global HINGLISH_MODEL, _HINGLISH_TRIED, _LAST_HINGLISH_ERROR
     if HINGLISH_MODEL is not None:
         return HINGLISH_MODEL
@@ -906,11 +825,10 @@ def get_hinglish_model() -> Optional[_HinglishHandle]:
         return None
     _HINGLISH_TRIED = True
 
-    # RULE 7: never load the huge Qwen model on CPU (60–160s = a latency-gate hang). The
-    # model is GPU-only (vLLM/transformers bf16). Without CUDA, return None so escalated
-    # clips fall back to the fast-path text. Dev override: STT_ALLOW_CPU_QWEN=1.
-    if not _gpu_available() and os.environ.get("STT_ALLOW_CPU_QWEN") != "1":
-        _LAST_HINGLISH_ERROR = "skipped: no CUDA GPU (RULE 7 — fast-path used; set STT_ALLOW_CPU_QWEN=1 to force CPU)"
+    # RULE 7: the Qwen model is GPU-only (vLLM / transformers bf16). Without CUDA, return
+    # None so escalated clips fall back to the fast-path text — never load it on CPU.
+    if not _gpu_available():
+        _LAST_HINGLISH_ERROR = "skipped: no CUDA GPU (RULE 7 — fast-path used)"
         _log(_LAST_HINGLISH_ERROR)
         return None
 
@@ -1175,7 +1093,6 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
     fast_text = ""
     hinglish_text = ""
     fast_language = ""
-    fast_avg_logprob = 0.0
     asr_ms = 0
     escalated = False
 
@@ -1190,7 +1107,6 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
             fr = fast_transcribe(asr_input)
             fast_text = fr["text"]
             fast_language = fr["language"]
-            fast_avg_logprob = float(fr["avg_logprob"])
             asr_ms += int(fr["time_ms"])
             if get_fast_model() is not None:
                 model_ids.append(FAST_MODEL_ID)
@@ -1234,26 +1150,9 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
                 "engine": FAST_MODEL_ID, "text": fast_text, "language": fast_language,
             })
 
-        # ---- ensemble → finalize → vocab/repair polish ----
+        # ---- finalize → vocab/repair polish ----
         p0 = time.time()
-        ens_hinglish = hinglish_text   # candidate finalize treats as the escalated text
-        ens_escalated = escalated
-        if (ENABLE_ENSEMBLE and _ensemble is not None
-                and hinglish_text.strip() and fast_text.strip()):
-            try:
-                fast_conf = max(0.1, min(0.95, 1.0 + fast_avg_logprob))
-                mres = _ensemble.merge_transcripts(fast_text, hinglish_text, fast_conf, 0.75)
-                if (mres.get("merged_text") or "").strip():
-                    ens_hinglish = mres["merged_text"]
-                    ens_escalated = True
-                    raw_candidates.append({
-                        "engine": "ensemble", "text": ens_hinglish,
-                        "merge_score": mres.get("merge_score"),
-                    })
-            except Exception:
-                pass
-
-        final_text = finalize_transcript(ens_hinglish, fast_text, mode, ens_escalated)
+        final_text = finalize_transcript(hinglish_text, fast_text, mode, escalated)
 
         # RULE 1: vocab/repair may only touch Latin (tech/number/spacing/caps); the guard
         # discards any change that would alter a Devanagari token.
@@ -1261,15 +1160,15 @@ def transcribe(wav_path: str, mode: str = "auto") -> dict:
             final_text = _apply_preserving_hindi(final_text, _vocab.normalize_tech_words)
         if ENABLE_REPAIR and _vocab is not None:
             final_text = _apply_preserving_hindi(final_text, _vocab.repair_common_asr_errors)
-        # TASK 5: drop Arabic/Urdu-script leakage from the fast model when a Hinglish
-        # (Devanagari) transcript exists. Does not touch router/ensemble/vocab/repair.
+        # Drop Arabic/Urdu-script leakage from the fast model when a Hinglish (Devanagari)
+        # transcript exists.
         final_text = _strip_arabic_if_hinglish(final_text, bool(hinglish_text.strip()))
         post_ms = round((time.time() - p0) * 1000)
 
         language_guess = _language_guess(final_text, fast_language)
         if mode == "auto":
             # report "hinglish" only when the escalated path actually produced output
-            ran_hinglish = any(c.get("engine") in (HINGLISH_QWEN_ID, HINGLISH_FALLBACK_ID)
+            ran_hinglish = any(c.get("engine") == HINGLISH_QWEN_ID
                                and (c.get("text") or "").strip() for c in raw_candidates)
             mode_used = "hinglish" if (escalated and ran_hinglish) else "fast"
         else:
