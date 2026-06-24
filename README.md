@@ -54,16 +54,17 @@ auto-uses the vLLM backend, on Apple silicon it uses MPS.
 | Fast ASR / partials | `faster-whisper small` (int8) | CTranslate2, CPU | MIT |
 | Hinglish ASR / final | `moorlee/qwen3-asr-0.6b-hinglish` (0.6B) | transformers, Apple MPS, fp16 | Apache-2.0 |
 
-No ensemble, no romanization, no translation, no large-v3 fallback, no CPU Qwen,
-no AWQ/GPTQ, no CPU quantization. All permanently disabled.
+No ensemble, no romanization, no translation, no large-v3 fallback, no AWQ/GPTQ.
+All permanently disabled. (Qwen on CPU is allowed — fidelity-first — for GPU-less boxes.)
 
 ## Accelerator handling
 
 - **Apple silicon (M1/M2/M3):** Qwen runs on the **MPS** (Metal) backend, fp16, `sdpa`
   attention. faster-whisper runs CPU int8 (CTranslate2 has no Metal backend).
 - **CUDA box:** the loader auto-selects vLLM (Triton attention) or transformers bf16/FA2.
-- **Pure CPU (no accelerator):** the Qwen path is skipped (RULE 7) and the fast English draft
-  is returned — never a multi-minute CPU load.
+- **Pure CPU (no accelerator):** Qwen runs on CPU (fp32/sdpa), **fidelity-first** — the
+  code-switch quality is kept at the cost of a slower final. Set `STT_DISABLE_CPU_QWEN=1`
+  to fall back to faster-whisper-only (fast final, weaker code-switch) instead.
 
 ## Offline Mode
 
@@ -82,9 +83,10 @@ no AWQ/GPTQ, no CPU quantization. All permanently disabled.
 
 ## Hardware
 
-- **Scoring box:** Apple-silicon MacBook Pro M1 (no cloud GPU).
-- **Requirement:** Apple silicon for the MPS Qwen path; CPU-only still works (fast English
-  draft, Hinglish path skipped). On a CUDA box add `pip install vllm` to use the GPU backend.
+- **Scoring box:** Apple-silicon MacBook Pro M1 — Qwen runs on the integrated GPU (Metal/MPS).
+- **Runs anywhere:** Apple silicon uses MPS; a CPU-only box (e.g. a Windows dev PC) runs Qwen
+  on CPU (fidelity-first, slower) so you can develop/test it locally; on a CUDA box add
+  `pip install vllm` for the GPU backend. `STT_DISABLE_CPU_QWEN=1` skips CPU Qwen for speed.
 
 ## Submission Notes
 

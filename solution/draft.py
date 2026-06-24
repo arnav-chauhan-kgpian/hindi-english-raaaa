@@ -37,6 +37,7 @@ _DEBOUNCE_S = 0.45            # re-run the fast model at most this often during 
 _LOCK = threading.Lock()
 _STATE: dict = {}
 _WARMED = False
+_WARM_THREAD: Optional[threading.Thread] = None
 
 
 def _reset() -> None:
@@ -49,8 +50,8 @@ _reset()
 
 
 def _warm_async() -> None:
-    """Load fast (+ Hinglish if an accelerator exists) models off the hot path."""
-    global _WARMED
+    """Load fast + Hinglish models off the hot path (background thread)."""
+    global _WARMED, _WARM_THREAD
     if _WARMED:
         return
     _WARMED = True
@@ -61,12 +62,23 @@ def _warm_async() -> None:
         except Exception:
             pass
         try:
-            if T._gpu_available():     # CUDA or Apple MPS — Qwen is accelerator-only (RULE 7)
-                T.get_hinglish_model()
+            # Warm Qwen too (MPS on the M1 scoring box, CPU elsewhere) so the load never
+            # blocks the stream. get_hinglish_model self-gates (STT_DISABLE_CPU_QWEN).
+            T.get_hinglish_model()
         except Exception:
             pass
 
-    threading.Thread(target=_w, daemon=True).start()
+    _WARM_THREAD = threading.Thread(target=_w, daemon=True)
+    _WARM_THREAD.start()
+
+
+def _await_warm(timeout: float = 120.0) -> None:
+    """Block until the background warm thread finishes loading the models. Needed at
+    is_final: the warm thread is the one caller that actually loads Qwen (the loader is
+    single-shot), so the final must wait for it rather than race ahead and get None."""
+    th = _WARM_THREAD
+    if th is not None and th.is_alive():
+        th.join(timeout)
 
 
 def warmup() -> None:
@@ -76,8 +88,7 @@ def warmup() -> None:
     except Exception:
         pass
     try:
-        if T._gpu_available():
-            T.get_hinglish_model()
+        T.get_hinglish_model()   # self-gates on STT_DISABLE_CPU_QWEN
     except Exception:
         pass
 
@@ -134,6 +145,7 @@ def _finalize(audio: np.ndarray) -> str:
 
         hing_text = ""
         if escalate:
+            _await_warm()   # ensure the (single-shot) Qwen load finished before we use it
             try:
                 if T.get_hinglish_model() is not None:
                     hing_text = T.hinglish_transcribe(audio).get("text", "")
@@ -201,8 +213,8 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
                         float(fr.get("avg_logprob", 0.0) or 0.0),
                         float(fr.get("compression_ratio", 0.0) or 0.0), text)
                     _STATE["escalate"] = True if esc else (_STATE.get("escalate") or False)
-                    if esc:
-                        T.get_hinglish_model()  # warm Qwen as soon as Hinglish is seen
+                    # (Qwen is already warming in the background thread from the first call;
+                    # don't load it here — on CPU that would block this partial.)
                 except Exception:
                     pass
 

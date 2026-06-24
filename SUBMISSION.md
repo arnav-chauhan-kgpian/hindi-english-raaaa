@@ -29,7 +29,8 @@ in real time via the sealed `stream_server.py` harness; the entry point is
   faster-whisper CPU int8 (CTranslate2 has no Metal backend).
 - **CUDA box (portability):** loader auto-selects vLLM (`VLLM_ATTENTION_BACKEND=TRITON_ATTN`)
   or transformers bf16/FA2. vLLM is not a pinned dependency (CUDA-only).
-- **Pure CPU:** Qwen skipped (RULE 7) → fast English draft returned (never a multi-minute load).
+- **Pure CPU (e.g. a GPU-less dev box):** Qwen runs on CPU (fp32/sdpa), fidelity-first — the
+  final is slower but the code-switch is kept. `STT_DISABLE_CPU_QWEN=1` reverts to fast-only.
 - Generation: greedy (`num_beams=1`, `do_sample=False`), `max_new_tokens=256`,
   `no_repeat_ngram_size=3`, `repetition_penalty=1.3` (anti-runaway).
 
@@ -38,7 +39,7 @@ in real time via the sealed `stream_server.py` harness; the entry point is
 - Hang: none (background warmup, load watchdog, no blocked-network retries).
 - Offline after warmup: PASS (`local_files_only=True`, `HF_HUB_OFFLINE=1`).
 - Hindi preserved · no romanization · no translation · English tech terms preserved ·
-  no Arabic/Urdu leakage · GPU/MPS-only Hinglish · ensemble disabled.
+  no Arabic/Urdu leakage · ensemble disabled. Qwen prefers GPU/MPS, CPU fallback allowed.
 
 ## Exact commands
 ```bash
