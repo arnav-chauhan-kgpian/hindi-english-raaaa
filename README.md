@@ -26,6 +26,11 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
   Apple **MPS** only for Hinglish → vocab/repair → Arabic strip. The route is decided *during*
   streaming (sticky), so a Hinglish final goes straight to Qwen and skips a redundant fast pass
   to keep end-to-final latency down.
+- **Speculative final (latency):** when the speaker pauses near the end, the Qwen pass is
+  launched in the background *before* `is_final` arrives, so the final returns near-instantly.
+  Fail-safe by construction — never hangs (timeout-bounded lock), never blanks/crashes
+  (synchronous + committed-text fallbacks), never runs two MPS calls at once, and never slower
+  than the plain synchronous path. Disable with `STT_SPECULATIVE_FINAL=0`.
 - **Warmup:** models load in a background thread on the first call (and via `draft.warmup()`),
   so the one-time load never blocks the stream. Every path is exception-wrapped — never
   blank-by-crash, never hang.

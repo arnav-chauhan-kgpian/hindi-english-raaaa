@@ -14,7 +14,7 @@ in real time via the sealed `stream_server.py` harness; the entry point is
 | `audio_buffer` (cumulative PCM s16le 16k) | decoded `int16 → float32/32768` |
 | Partials / TTFS | faster-whisper-small (CPU int8), debounced ~0.45 s, emitted as `(text, stable_chars)` |
 | `stable_chars` / revision churn | longest common-prefix backed off to a word boundary, **monotonic** (never un-committed) |
-| End-to-final latency | sticky router: Hinglish final goes straight to Qwen (skips a redundant fast pass) |
+| End-to-final latency | sticky router (Hinglish final → straight to Qwen) + **speculative final**: Qwen is pre-run during the trailing pause so is_final returns near-instantly. Fail-safe: timeout-bounded lock (no hang), synchronous + committed-text fallbacks (no blank), one MPS call at a time, never slower than synchronous. Off via `STT_SPECULATIVE_FINAL=0`. |
 | Meaning & fidelity / critical facts | final = recall router → Qwen3-ASR (MPS) → vocab/repair → Arabic strip |
 | Reliability (no blank/loop/hang) | background model warmup; every path exception-wrapped; anti-runaway gen config |
 

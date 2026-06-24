@@ -16,11 +16,17 @@ Design (Apple-silicon / M1, no CUDA — the frozen scoring box):
     Qwen3-ASR (Apple MPS) only for Hinglish → vocab/repair → Arabic strip. Routing is
     decided during streaming (sticky), so a Hinglish final goes straight to Qwen (skips a
     redundant fast pass) to keep end-to-final latency down.
+  * Speculative final: when the speaker pauses near the end, the Qwen pass is started in the
+    background (on MPS) BEFORE is_final arrives, so the final returns near-instantly. It is
+    engineered to fail safe — it can never hang (timeout-bounded lock), never blank/crash
+    (synchronous + committed-text fallbacks), never run two MPS calls at once (one lock), and
+    never be slower than the plain synchronous path. Disable with STT_SPECULATIVE_FINAL=0.
   * Models warm in a background thread on the first call, so the load (one-time) does not
     block streaming. Everything is exception-wrapped — never blank-by-crash, never hang.
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from typing import Optional
@@ -33,14 +39,30 @@ TARGET_SR = 16000
 _MIN_PARTIAL_S = 0.30          # need ≥300ms of audio before the first partial
 _DEBOUNCE_S = 0.45            # re-run the fast model at most this often during streaming
 
+# ---- speculative final: pre-run Qwen during the trailing pause so is_final lands fast ----
+_SPEC_ENABLED = os.environ.get("STT_SPECULATIVE_FINAL", "1") not in ("0", "false", "False")
+_SPEC_SILENCE_S = 0.35        # trailing window checked for a pause
+_SPEC_SILENCE_RMS = 0.015     # tail RMS below this → likely end-of-utterance
+_SPEC_MIN_GROWTH_S = 1.0      # don't relaunch unless ≥this much new audio since the last spec
+_SPEC_COVER_S = 0.80          # spec is usable if the final buffer grew ≤this since the spec
+_QWEN_FINAL_TIMEOUT = 12.0    # hard cap (s) on waiting for the Qwen lock at is_final → no hang
+
 # ---- single active-stream state (the harness runs one clip at a time) -------
 _LOCK = threading.Lock()
 _STATE: dict = {}
 _WARMED = False
 _WARM_THREAD: Optional[threading.Thread] = None
 
+_QWEN_LOCK = threading.Lock()  # serialize Qwen inference — never two MPS calls at once
+_SPEC: tuple = (-1, "")        # (n_samples, raw_hinglish_text) — written via atomic rebind
+_SPEC_RUNNING = False
+_SPEC_GEN = 0                  # bumped on reset; a stale worker discards its result
+
 
 def _reset() -> None:
+    global _SPEC, _SPEC_GEN
+    _SPEC = (-1, "")
+    _SPEC_GEN += 1            # invalidate any in-flight speculative worker from a prior clip
     _STATE.clear()
     _STATE.update(committed_len=0, last_text="", last_len=0, last_run_len=-10 ** 9,
                   escalate=None, last_fast=None)
@@ -125,8 +147,73 @@ def _fast_text(audio: np.ndarray):
         return None
 
 
+def _trailing_silence(audio: np.ndarray) -> bool:
+    """True if the last ~350 ms look like a pause (likely end-of-utterance)."""
+    k = int(_SPEC_SILENCE_S * TARGET_SR)
+    if audio.shape[0] < k:
+        return False
+    try:
+        tail = audio[-k:]
+        return float(np.sqrt(np.mean(tail * tail))) < _SPEC_SILENCE_RMS
+    except Exception:
+        return False
+
+
+def _qwen_raw(audio: np.ndarray, timeout: Optional[float] = None) -> Optional[str]:
+    """Run Qwen once, serialized via _QWEN_LOCK (one MPS call at a time). Returns the raw
+    transcript, ``""`` if the model is unavailable/blank, or ``None`` if the lock could not
+    be acquired within ``timeout`` — the caller then degrades instead of blocking/hanging."""
+    acquired = _QWEN_LOCK.acquire(timeout=timeout) if timeout is not None else _QWEN_LOCK.acquire()
+    if not acquired:
+        return None
+    try:
+        if T.get_hinglish_model() is None:
+            return ""
+        return T.hinglish_transcribe(audio).get("text", "")
+    except Exception:
+        return ""
+    finally:
+        _QWEN_LOCK.release()
+
+
+def _spec_worker(audio: np.ndarray, n: int, gen: int) -> None:
+    """Background: compute the Qwen final on a snapshot so the eventual is_final is instant."""
+    global _SPEC, _SPEC_RUNNING
+    try:
+        txt = _qwen_raw(audio)             # background → fine to wait for the lock
+        if txt and gen == _SPEC_GEN:       # discard if a new clip started meanwhile
+            _SPEC = (n, txt)
+    except Exception:
+        pass
+    finally:
+        _SPEC_RUNNING = False
+
+
+def _maybe_speculate(audio: np.ndarray, n: int) -> None:
+    """If the speaker paused near the end (Hinglish clip), pre-run the Qwen final in the
+    background. Best-effort and fully optional — if it never fires, is_final just runs the
+    plain synchronous path. Never blocks the caller."""
+    global _SPEC_RUNNING
+    if not _SPEC_ENABLED or _SPEC_RUNNING:
+        return
+    if _STATE.get("escalate") is not True:
+        return
+    if (n - _SPEC[0]) < int(_SPEC_MIN_GROWTH_S * TARGET_SR):
+        return
+    if not _trailing_silence(audio):
+        return
+    try:
+        if T.get_hinglish_model() is None:   # model not ready/available → don't speculate
+            return
+    except Exception:
+        return
+    _SPEC_RUNNING = True
+    threading.Thread(target=_spec_worker, args=(audio, n, _SPEC_GEN), daemon=True).start()
+
+
 def _finalize(audio: np.ndarray) -> str:
     """Best faithful final on the complete buffer — the batch accuracy pipeline."""
+    n = int(audio.shape[0])         # samples in the complete buffer (used by the spec-cover check)
     escalate = _STATE.get("escalate")
     fast_text = ""
     try:
@@ -146,11 +233,14 @@ def _finalize(audio: np.ndarray) -> str:
         hing_text = ""
         if escalate:
             _await_warm()   # ensure the (single-shot) Qwen load finished before we use it
-            try:
-                if T.get_hinglish_model() is not None:
-                    hing_text = T.hinglish_transcribe(audio).get("text", "")
-            except Exception:
-                hing_text = ""
+            sl, st = _SPEC  # snapshot the speculative result (atomic tuple read)
+            if _SPEC_ENABLED and st and 0 <= sl <= n and (n - sl) <= int(_SPEC_COVER_S * TARGET_SR):
+                hing_text = st            # pause-time speculation already covers this buffer → instant
+            else:
+                # no usable speculation → run Qwen now (timeout-bounded lock → never hangs;
+                # None means the lock was stuck, so we degrade to the fast/committed text).
+                txt = _qwen_raw(audio, timeout=_QWEN_FINAL_TIMEOUT)
+                hing_text = txt or ""
             # Qwen unavailable / blank → we skipped the fast pass; run it now on the full
             # buffer so the final still captures everything (incl. the tail), never blank.
             if not hing_text.strip() and not fast_text.strip():
@@ -221,6 +311,7 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
             commit = _commit_len(_STATE.get("last_text", ""), text, _STATE.get("committed_len", 0))
             _STATE["committed_len"] = commit
             _STATE["last_text"] = text
+            _maybe_speculate(audio, n)   # pre-run the Qwen final if the speaker paused
             return (text, commit)
         except Exception:
             # reliability: never raise out of the streaming hot path
