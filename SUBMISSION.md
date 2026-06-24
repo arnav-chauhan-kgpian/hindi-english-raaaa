@@ -37,7 +37,10 @@ in real time via the sealed `stream_server.py` harness; the entry point is
 ## Reliability / constraints
 - Blank-by-crash: none (every path wrapped; final never blank when any candidate has content).
 - Hang: none (background warmup, load watchdog, no blocked-network retries).
-- Offline after warmup: PASS (`local_files_only=True`, `HF_HUB_OFFLINE=1`).
+- Offline after warmup: PASS. Models warm at module import (background thread) so the load
+  happens during the network-up setup phase; the cached Qwen is then loaded from its on-disk
+  snapshot **path** (not the repo id) so the scored run makes zero HF API calls when the
+  network guard is active (`local_files_only=True`).
 - Hindi preserved · no romanization · no translation · English tech terms preserved ·
   no Arabic/Urdu leakage · ensemble disabled. Qwen prefers GPU/MPS, CPU fallback allowed.
 

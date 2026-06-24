@@ -747,9 +747,12 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
     global _LAST_HINGLISH_ERROR
     try:
         cached = False
+        local_path = None
         try:
             from huggingface_hub import snapshot_download
-            snapshot_download(HINGLISH_QWEN_NAME, local_files_only=True)  # no network if cached
+            # capture the on-disk snapshot dir → load from the PATH (not the repo id) so the
+            # offline scored run never makes an HF API call (which the network guard blocks).
+            local_path = snapshot_download(HINGLISH_QWEN_NAME, local_files_only=True)
             cached = True
         except Exception:
             cached = False
@@ -760,6 +763,7 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
         from qwen_asr import Qwen3ASRModel  # local import: heavy deps loaded only when needed
 
         local_only = cached  # cached → offline (local_files_only); cold → one-time download
+        model_ref = local_path if (cached and local_path) else HINGLISH_QWEN_NAME  # path skips API
         _log(f"loading Qwen3-ASR '{HINGLISH_QWEN_NAME}' (cached={cached}, local_files_only={local_only})")
         # NOTE: do NOT force HF_HUB_OFFLINE=1 — qwen-asr makes an API call that raises
         # OfflineModeIsEnabled under forced offline. local_files_only=True is the correct
@@ -778,7 +782,7 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
                 import vllm  # noqa: F401
                 t0 = time.time()
                 vmodel = Qwen3ASRModel.LLM(
-                    HINGLISH_QWEN_NAME,
+                    model_ref,
                     gpu_memory_utilization=float(os.environ.get("STT_GPU_MEM_UTIL", "0.85")),
                     max_inference_batch_size=32,
                     max_new_tokens=QWEN_MAX_NEW_TOKENS,
@@ -814,10 +818,10 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
             load_kwargs.update(dtype=torch.float32, attn_implementation="sdpa")
         t0 = time.time()
         try:                                      # honor RULE-3 local_files_only when supported
-            model = Qwen3ASRModel.from_pretrained(HINGLISH_QWEN_NAME, **load_kwargs)
+            model = Qwen3ASRModel.from_pretrained(model_ref, **load_kwargs)
         except TypeError:
             load_kwargs.pop("local_files_only", None)
-            model = Qwen3ASRModel.from_pretrained(HINGLISH_QWEN_NAME, **load_kwargs)
+            model = Qwen3ASRModel.from_pretrained(model_ref, **load_kwargs)
         load_ms = round((time.time() - t0) * 1000)
         # anti-runaway: stop degenerate repetition loops that otherwise generate all the way
         # to max_new_tokens (~80s on the T4 transformers backend). Mild, quality-safe.
