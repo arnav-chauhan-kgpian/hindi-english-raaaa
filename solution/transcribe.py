@@ -100,8 +100,7 @@ def _cpu_threads() -> int:
         return 4
 
 
-def _gpu_available() -> bool:
-    """True only if a CUDA GPU is usable (gates the GPU-only Qwen model per RULE 7)."""
+def _cuda_available() -> bool:
     try:
         import torch
         return bool(torch.cuda.is_available())
@@ -109,13 +108,30 @@ def _gpu_available() -> bool:
         return False
 
 
+def _mps_available() -> bool:
+    """Apple-silicon Metal (M1/M2/M3) accelerator."""
+    try:
+        import torch
+        return bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available())
+    except Exception:
+        return False
+
+
+def _gpu_available() -> bool:
+    """True if any accelerator (CUDA or Apple MPS) is usable. Gates the GPU-only Qwen
+    model per RULE 7 — never load it on a pure CPU box (too slow)."""
+    return _cuda_available() or _mps_available()
+
+
 def _gpu_dtype():
-    """bf16 on Ampere+; fp16 on GPUs without bf16 (e.g. T4/Turing) to avoid errors/slowdown."""
+    """bf16 on Ampere+ CUDA; fp16 on T4/Turing and on Apple MPS."""
     import torch
     try:
-        return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        if _cuda_available() and torch.cuda.is_bf16_supported():
+            return torch.bfloat16
     except Exception:
-        return torch.float16
+        pass
+    return torch.float16
 
 
 # --- load-policy diagnostics (populated by the loaders; read by model_debug_status) ---
@@ -203,10 +219,10 @@ def _load_faster_whisper(model_name: str, meta: Optional[dict] = None) -> Any:
     allow_dl = _downloads_allowed()
     # local cache first; only add the download attempt when it's genuinely allowed
     local_only_opts = (True, False) if allow_dl else (True,)
-    # Run the fast model on the GPU when one is present (sub-second). Try CUDA first, then
-    # FALL BACK to CPU int8 (so a missing cuDNN never makes the fast model fail to load).
+    # CTranslate2 supports CUDA or CPU only (no Apple MPS) — so try CUDA when present, else
+    # CPU int8 (fast on Apple-silicon ARM CPUs). CPU fallback is always available.
     attempts = []
-    if _gpu_available():
+    if _cuda_available():
         attempts += [("cuda", "int8_float16"), ("cuda", "float16")]
     attempts += [("cpu", "int8"), ("cpu", "int8_float32"), ("cpu", "float32")]
     _log(f"faster-whisper '{model_name}': attempts={attempts} downloads_allowed={allow_dl} "
@@ -741,11 +757,12 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
         # OfflineModeIsEnabled under forced offline. local_files_only=True is the correct
         # offline switch: it uses the cache and skips the network.
         import torch
-        on_gpu = torch.cuda.is_available()
+        on_cuda = _cuda_available()
+        on_mps = _mps_available()      # Apple-silicon Metal (M1/M2/M3) — the live-track box
         backend_pref = os.environ.get("STT_QWEN_BACKEND", "auto")  # auto | vllm | transformers
 
-        # ---- FASTEST: vLLM backend (GPU only). Same model + same .transcribe() API. ----
-        if on_gpu and backend_pref in ("auto", "vllm"):
+        # ---- FASTEST: vLLM backend (CUDA only). Same model + same .transcribe() API. ----
+        if on_cuda and backend_pref in ("auto", "vllm"):
             try:
                 # Triton attention works across GPUs (incl. pre-Ampere T4); vLLM's default
                 # FlashInfer needs a JIT build that fails on some boxes (ld: -lcuda). Overridable.
@@ -769,17 +786,20 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
             except Exception as e:  # noqa: BLE001 — fall back to transformers backend
                 _log(f"vLLM unavailable, using transformers backend: {type(e).__name__}: {e}")
 
-        # ---- transformers backend (GPU bf16/FA2, or CPU fp32) ----
+        # ---- transformers backend: CUDA (bf16/FA2) or Apple MPS (fp16/sdpa) ----
         load_kwargs: dict = {"max_new_tokens": QWEN_MAX_NEW_TOKENS}
         if local_only:
             load_kwargs["local_files_only"] = True
-        if on_gpu:
+        if on_cuda:
             load_kwargs.update(device_map="cuda:0", dtype=_gpu_dtype())  # bf16 on Ampere+, else fp16
             try:
                 import flash_attn  # noqa: F401
                 load_kwargs["attn_implementation"] = "flash_attention_2"
             except Exception:
                 load_kwargs["attn_implementation"] = "sdpa"
+        elif on_mps:
+            load_kwargs.update(device_map="mps", dtype=torch.float16,
+                               attn_implementation="sdpa")  # Apple Metal; FA2/vLLM unavailable
         t0 = time.time()
         try:                                      # honor RULE-3 local_files_only when supported
             model = Qwen3ASRModel.from_pretrained(HINGLISH_QWEN_NAME, **load_kwargs)
@@ -796,17 +816,18 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
                 _gc.repetition_penalty = 1.3   # stronger: kills residual repetition loops
         except Exception:
             pass
-        quant = "off(gpu-bf16)"
+        device = "cuda" if on_cuda else ("mps" if on_mps else "cpu")
+        precision = "bf16" if (on_cuda and _gpu_dtype().__str__().endswith("bfloat16")) else "fp16"
 
         if meta is not None:
             meta.update(model=HINGLISH_QWEN_NAME, kind="qwen-asr", backend="transformers",
-                        device=("cuda" if on_gpu else "cpu"),
-                        precision=("bf16" if on_gpu else "fp32"),
+                        device=device, precision=precision,
                         local_files_only=local_only, cached=cached, cache=_hf_cache_dir(),
-                        load_ms=load_ms, quantization=quant, footprint_mb=_model_footprint_mb(model),
+                        load_ms=load_ms, quantization="off(" + precision + ")",
+                        footprint_mb=_model_footprint_mb(model),
                         max_new_tokens=QWEN_MAX_NEW_TOKENS, num_beams=1, do_sample=False)
         _LAST_HINGLISH_ERROR = ""
-        _log(f"Qwen3-ASR LOADED (cached={cached}, quant={quant}, {load_ms}ms)")
+        _log(f"Qwen3-ASR LOADED (cached={cached}, device={device}/{precision}, {load_ms}ms)")
         return _HinglishHandle("qwen", model, HINGLISH_QWEN_ID)
     except Exception as e:
         _LAST_HINGLISH_ERROR = f"qwen: {type(e).__name__}: {e}"
