@@ -39,6 +39,10 @@ from typing import Any, Optional, Union
 # is cached, subsequent loads hit the local cache (offline). Set STT_OFFLINE=1 (or
 # HF_HUB_OFFLINE=1) to force pure-offline; set STT_DEBUG=1 for verbose load logging.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Apple-silicon robustness: if any model op isn't implemented on the Metal (MPS) backend,
+# run THAT op on CPU instead of raising. Turns a hard MPS error into a graceful per-op
+# fallback — important on the M1 box where the Qwen path runs on MPS. (No effect off Apple.)
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 VERBOSE = os.environ.get("STT_DEBUG") == "1"
 
@@ -798,7 +802,12 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
             except Exception as e:  # noqa: BLE001 — fall back to transformers backend
                 _log(f"vLLM unavailable, using transformers backend: {type(e).__name__}: {e}")
 
-        # ---- transformers backend: CUDA (bf16/FA2) or Apple MPS (fp16/sdpa) ----
+        # ---- transformers backend ----
+        # CUDA: device_map + FA2/sdpa (validated on the T4). Apple MPS / CPU: load on CPU with
+        # NO device_map and NO forced attn_implementation — the custom qwen3_asr arch + accelerate
+        # can reject device_map="mps" and a forced sdpa kernel (this is the path that "doesn't run
+        # on the box"). After loading we MOVE the module to the Apple GPU via .to("mps"); ANY
+        # failure there falls back to CPU, so the model always loads and runs.
         load_kwargs: dict = {"max_new_tokens": QWEN_MAX_NEW_TOKENS}
         if local_only:
             load_kwargs["local_files_only"] = True
@@ -809,19 +818,35 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
                 load_kwargs["attn_implementation"] = "flash_attention_2"
             except Exception:
                 load_kwargs["attn_implementation"] = "sdpa"
-        elif on_mps:
-            load_kwargs.update(device_map="mps", dtype=torch.float16,
-                               attn_implementation="sdpa")  # Apple Metal; FA2/vLLM unavailable
         else:
-            # CPU fallback (no accelerator): fp32 + sdpa. Slow but keeps the code-switch
-            # faithful — fidelity-first. Lets the engine run/test on a GPU-less box.
-            load_kwargs.update(dtype=torch.float32, attn_implementation="sdpa")
+            load_kwargs["dtype"] = torch.float32   # safe minimal CPU load; cast on the MPS move
+
         t0 = time.time()
         try:                                      # honor RULE-3 local_files_only when supported
             model = Qwen3ASRModel.from_pretrained(model_ref, **load_kwargs)
         except TypeError:
             load_kwargs.pop("local_files_only", None)
             model = Qwen3ASRModel.from_pretrained(model_ref, **load_kwargs)
+
+        device = "cuda" if on_cuda else "cpu"
+        if on_mps:                                # opportunistic Apple-GPU move; CPU on any failure
+            try:
+                inner = getattr(model, "model", None)
+                if inner is not None:
+                    inner.to("mps", dtype=torch.float16)
+                    try:
+                        model.device = next(inner.parameters()).device
+                    except Exception:
+                        pass
+                    try:
+                        model.dtype = torch.float16
+                    except Exception:
+                        pass
+                    device = "mps"
+                    _log("Qwen3-ASR moved to Apple MPS (fp16)")
+            except Exception as e:  # noqa: BLE001 — MPS unsupported/unavailable → stay on CPU
+                _log(f"MPS move failed ({type(e).__name__}: {e}); running Qwen on CPU")
+                device = "cpu"
         load_ms = round((time.time() - t0) * 1000)
         # anti-runaway: stop degenerate repetition loops that otherwise generate all the way
         # to max_new_tokens (~80s on the T4 transformers backend). Mild, quality-safe.
@@ -832,8 +857,8 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
                 _gc.repetition_penalty = 1.3   # stronger: kills residual repetition loops
         except Exception:
             pass
-        device = "cuda" if on_cuda else ("mps" if on_mps else "cpu")
-        precision = "bf16" if (on_cuda and _gpu_dtype().__str__().endswith("bfloat16")) else "fp16"
+        precision = ("bf16" if (on_cuda and _gpu_dtype().__str__().endswith("bfloat16"))
+                     else "fp16" if device in ("cuda", "mps") else "fp32")
 
         if meta is not None:
             meta.update(model=HINGLISH_QWEN_NAME, kind="qwen-asr", backend="transformers",
