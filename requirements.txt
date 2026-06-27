@@ -1,20 +1,19 @@
 # Builderr Speech-to-Text — STREAMING / dictation track dependencies.
 # Target: Apple-silicon MacBook Pro M1 (the frozen scoring box). No CUDA, no vLLM.
-#   * faster-whisper runs CPU int8 (CTranslate2 has no Metal backend) — fast English partials.
-#   * Qwen3-ASR runs on Apple MPS via transformers (fp16/sdpa) — the Hinglish final.
+#   * Hinglish FINAL: a Whisper-large-v3 finetune (Oriserve/Whisper-Hindi2Hinglish-*) via the
+#     standard transformers ASR pipeline — loads cleanly on Apple MPS (no custom architecture).
+#   * Fast PARTIALS: faster-whisper-small (CTranslate2, CPU int8) for low-latency streaming.
 # Warm the cache once online, then run fully offline (HF_HUB_OFFLINE=1 / local_files_only).
-# NOTE: on a CUDA box the same code still uses vLLM if `pip install vllm` is added — the
-# loader auto-detects CUDA. vLLM is intentionally NOT a dependency here (CUDA-only).
+# Versions below match the stack the engine was verified against.
 
-faster-whisper>=1.0          # fast English / Indian-English partials (CTranslate2, CPU int8)
-qwen-asr==0.0.6              # Hinglish recognizer wrapper (provides Qwen3ASRModel; transformers backend)
-torch>=2.2                   # Apple-silicon build ships the MPS (Metal) backend used by Qwen
-transformers>=4.46           # required by qwen-asr (model + processor)
-accelerate>=0.30             # device_map / model loading helper
+faster-whisper>=1.0          # fast streaming partials (CTranslate2, CPU int8 on Apple silicon)
+transformers>=5.0,<6         # Whisper-Hinglish final via the ASR pipeline (verified on 5.12.1)
+torch>=2.2                   # Apple-silicon build ships the MPS (Metal) backend
+accelerate>=1.0              # device placement + low_cpu_mem_usage loading
+safetensors>=0.4.0           # weights format (use_safetensors=True)
 huggingface_hub>=0.24        # local-cache-first model resolution (local_files_only=True)
 ctranslate2>=4.5             # faster-whisper runtime (CPU int8 on Apple silicon)
 sentencepiece>=0.2.0         # tokenizer dependency
-safetensors>=0.4.0           # weights format
 numpy>=1.24                  # PCM decode + audio buffers in solution/draft.py
 psutil>=5.9                  # memory/diagnostics
 soundfile>=0.12              # audio decode (wav/flac) for load_audio()

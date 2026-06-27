@@ -57,10 +57,15 @@ AudioInput = Union["Any", str]
 
 # --- model identifiers (surfaced in model_ids / raw_candidates for auditability)
 FAST_MODEL_ID = "faster-whisper-small-int8"
-HINGLISH_QWEN_ID = "qwen3-asr-0.6b-hinglish"
+HINGLISH_QWEN_ID = "qwen3-asr-0.6b-hinglish"           # legacy (custom arch — did not load on the M1)
+HINGLISH_WHISPER_ID = "whisper-hindi2hinglish"         # active: standard Whisper arch, loads on MPS
 
 FAST_MODEL_NAME = "small"
 HINGLISH_QWEN_NAME = "moorlee/qwen3-asr-0.6b-hinglish"
+# Hinglish final = a Whisper-large-v3 finetune (standard transformers arch → loads cleanly on
+# Apple MPS, unlike the custom qwen3_asr arch). Configurable so the box can trade latency vs
+# fidelity: Prime (2B, most faithful) | Swift / Apex (smaller, faster). Apache-2.0.
+HINGLISH_WHISPER_NAME = os.environ.get("STT_HINGLISH_MODEL", "Oriserve/Whisper-Hindi2Hinglish-Prime")
 
 # Generation cap for Qwen3-ASR. Decode is ~95% of latency and ~linear in tokens; typical
 # dictation clips stop at EOS well under this, so 256 is quality-safe and only bounds
@@ -876,11 +881,76 @@ def _load_qwen_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle
         return None
 
 
+def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHandle]:
+    """Load the active Hinglish recognizer: a Whisper-large-v3 finetune
+    (``Oriserve/Whisper-Hindi2Hinglish-*``, Apache-2.0) via the STANDARD transformers ASR
+    pipeline. Standard architecture → loads on CUDA / Apple MPS / CPU with no custom code,
+    which is why it runs on the M1 box where the custom qwen3_asr arch did not. Local cache
+    first; downloads ONCE when allowed then loads offline. Returns ``None`` on failure."""
+    global _LAST_HINGLISH_ERROR
+    try:
+        import torch
+        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+
+        name = HINGLISH_WHISPER_NAME
+        cached, local_path = False, None
+        try:                                  # resolve on-disk path → no HF API call when offline
+            from huggingface_hub import snapshot_download
+            local_path = snapshot_download(name, local_files_only=True)
+            cached = True
+        except Exception:
+            cached = False
+        if not cached and not _downloads_allowed():
+            _log("Whisper-Hinglish not cached and downloads not allowed — skipping")
+            return None
+        ref = local_path if (cached and local_path) else name
+        lfo = {"local_files_only": True} if cached else {}
+
+        on_cuda, on_mps = _cuda_available(), _mps_available()
+        dtype = torch.float16 if (on_cuda or on_mps) else torch.float32
+        t0 = time.time()
+        common = dict(low_cpu_mem_usage=True, use_safetensors=True, **lfo)
+        try:                                  # `dtype` (transformers ≥4.56/5.x) …
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(ref, dtype=dtype, **common)
+        except TypeError:                     # … `torch_dtype` (older transformers)
+            model = AutoModelForSpeechSeq2Seq.from_pretrained(ref, torch_dtype=dtype, **common)
+
+        device = "cuda:0" if on_cuda else ("mps" if on_mps else "cpu")
+        try:
+            model.to(device)                  # Whisper moves to MPS cleanly (no device_map needed)
+        except Exception as e:                # noqa: BLE001 — any accelerator hiccup → CPU
+            _log(f"move to {device} failed ({type(e).__name__}: {e}); using CPU")
+            device = "cpu"
+            model.to("cpu")
+
+        processor = AutoProcessor.from_pretrained(ref, **lfo)
+        pipe = pipeline(
+            "automatic-speech-recognition", model=model,
+            tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor,
+            dtype=dtype, device=device, chunk_length_s=30,
+            generate_kwargs={"task": "transcribe", "language": "en"},  # finetune emits Hinglish
+        )
+        load_ms = round((time.time() - t0) * 1000)
+        if meta is not None:
+            meta.update(model=name, kind="whisper-hinglish", backend="transformers",
+                        device=("cuda" if on_cuda else device),
+                        precision=("fp16" if dtype == torch.float16 else "fp32"),
+                        local_files_only=cached, cached=cached, cache=_hf_cache_dir(),
+                        load_ms=load_ms, num_beams=1, do_sample=False)
+        _LAST_HINGLISH_ERROR = ""
+        _log(f"Whisper-Hinglish LOADED '{name}' (device={device}, {load_ms}ms)")
+        return _HinglishHandle("whisper", pipe, HINGLISH_WHISPER_ID)
+    except Exception as e:
+        _LAST_HINGLISH_ERROR = f"whisper: {type(e).__name__}: {e}"
+        _log(f"Whisper-Hinglish load failed — {_LAST_HINGLISH_ERROR}")
+        return None
+
+
 def get_hinglish_model() -> Optional[_HinglishHandle]:
-    """Return the resident Hinglish recognizer: ``moorlee/qwen3-asr-0.6b-hinglish`` via the
-    qwen-asr package (Apache-2.0, code-switch-faithful). Prefers an accelerator
-    (CUDA→vLLM, Apple→MPS) and falls back to CPU (fidelity-first). Loaded once, cached at
-    module scope. ``None`` on failure — escalated clips then keep the fast English draft."""
+    """Return the resident Hinglish recognizer: a Whisper-large-v3 finetune
+    (``Oriserve/Whisper-Hindi2Hinglish-*``, Apache-2.0) via the standard transformers ASR
+    pipeline. Prefers an accelerator (CUDA / Apple MPS) and falls back to CPU. Loaded once,
+    cached at module scope. ``None`` on failure — the final then keeps the fast draft."""
     global HINGLISH_MODEL, _HINGLISH_TRIED, _LAST_HINGLISH_ERROR
     if HINGLISH_MODEL is not None:
         return HINGLISH_MODEL
@@ -888,24 +958,23 @@ def get_hinglish_model() -> Optional[_HinglishHandle]:
         return None
     _HINGLISH_TRIED = True
 
-    # No accelerator AND CPU explicitly disabled → skip (fast-path-only behavior).
-    # Default: run on CPU (fidelity-first). Scoring on the M1 uses MPS, so this only
-    # affects GPU-less boxes (e.g. local testing or a CPU-only grader).
+    # No accelerator AND CPU explicitly disabled → skip (fast-path-only). Default: run on CPU.
+    # Scoring on the M1 uses MPS, so this only affects GPU-less boxes (local testing).
     if not _gpu_available() and not _cpu_qwen_allowed():
         _LAST_HINGLISH_ERROR = "skipped: no GPU and STT_DISABLE_CPU_QWEN=1 (fast-path used)"
         _log(_LAST_HINGLISH_ERROR)
         return None
     if not _gpu_available():
-        _log("no accelerator — loading Qwen on CPU (fidelity-first; slower final)")
+        _log("no accelerator — loading Whisper-Hinglish on CPU (slower final)")
 
-    # generous one-time-load cap when offline (a complete cache loads in seconds; this only
-    # guards against a partial-cache hang). No cap when a download is expected.
-    to = None if _downloads_allowed() else 120.0
+    # No one-shot cap when a download is expected; a generous cap when offline guards a
+    # partial-cache hang (large-v3 weights load in a few seconds from a complete cache).
+    to = None if _downloads_allowed() else 180.0
     try:
-        HINGLISH_MODEL = _call_with_timeout(lambda: _load_qwen_hinglish(_HINGLISH_META), to)
+        HINGLISH_MODEL = _call_with_timeout(lambda: _load_whisper_hinglish(_HINGLISH_META), to)
     except Exception as e:
-        _LAST_HINGLISH_ERROR = f"qwen: {type(e).__name__}: {e}"
-        _log(f"Qwen3-ASR load aborted — {_LAST_HINGLISH_ERROR}")
+        _LAST_HINGLISH_ERROR = f"whisper: {type(e).__name__}: {e}"
+        _log(f"Whisper-Hinglish load aborted — {_LAST_HINGLISH_ERROR}")
         HINGLISH_MODEL = None
     return HINGLISH_MODEL
 
@@ -970,12 +1039,17 @@ def hinglish_transcribe(audio: AudioInput) -> dict[str, Any]:
         return out
     out["model_id"] = handle.model_id
     try:
-        # qwen-asr .transcribe accepts a file path or an (np.ndarray, sample_rate) tuple,
-        # and keeps the code-switch faithful (Devanagari Hindi + Latin English; no translation).
-        audio_arg: Any = audio if isinstance(audio, str) else (audio, TARGET_SR)
-        res = handle.obj.transcribe(audio_arg, language=None)
-        item = res[0] if isinstance(res, list) and res else res
-        out["text"] = (getattr(item, "text", "") or "").strip()
+        if handle.kind == "whisper":
+            # transformers ASR pipeline: accepts a 16k float32 ndarray or a file path and
+            # returns {"text": ...}. The finetune emits faithful Hinglish (Latin code-switch).
+            res = handle.obj(audio)
+            out["text"] = ((res.get("text", "") if isinstance(res, dict) else "") or "").strip()
+        else:
+            # legacy qwen-asr: file path or (np.ndarray, sample_rate) tuple
+            audio_arg: Any = audio if isinstance(audio, str) else (audio, TARGET_SR)
+            res = handle.obj.transcribe(audio_arg, language=None)
+            item = res[0] if isinstance(res, list) and res else res
+            out["text"] = (getattr(item, "text", "") or "").strip()
     except Exception:
         pass  # leave blank; the finalizer falls back to the fast draft
     out["time_ms"] = round((time.time() - t0) * 1000)

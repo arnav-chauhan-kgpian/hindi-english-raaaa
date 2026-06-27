@@ -1,8 +1,9 @@
 # arnav's Speech-to-Text — Local Hinglish Streaming Dictation
 
 A local, offline streaming dictation engine for English, Indian-English, and Hindi-English
-(code-switch) work dictation. It preserves the code-switch faithfully — Hindi stays in
-Devanagari, English tech terms stay in Latin — and never translates or romanizes.
+(code-switch) work dictation. The faithful final is produced by a Whisper-large-v3 Hinglish
+finetune that keeps the Hindi-English mix as readable romanized Hinglish (e.g. "mujhe kal AWS
+ka deployment dekhna hai"), never translating to pure English.
 
 Built for the **streaming / dictation track**: scored on a frozen **Apple-silicon MacBook Pro
 M1** (no cloud GPU). Audio is fed in real time; the score is driven by how fast a clean final
@@ -22,54 +23,51 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
 
 - **Partials (streaming):** faster-whisper-small (CPU int8) on the growing buffer, debounced
   (~0.45 s). Commit a monotonic word-boundary prefix → fast TTFS, low revision churn.
-- **Final (`is_final=True`):** the validated accuracy pipeline — recall router → Qwen3-ASR on
-  Apple **MPS** only for Hinglish → vocab/repair → Arabic strip. The route is decided *during*
-  streaming (sticky), so a Hinglish final goes straight to Qwen and skips a redundant fast pass
-  to keep end-to-final latency down.
-- **Speculative final (latency):** when the speaker pauses near the end, the Qwen pass is
-  launched in the background *before* `is_final` arrives, so the final returns near-instantly.
-  Fail-safe by construction — never hangs (timeout-bounded lock), never blanks/crashes
-  (synchronous + committed-text fallbacks), never runs two MPS calls at once, and never slower
-  than the plain synchronous path. Disable with `STT_SPECULATIVE_FINAL=0`.
-- **Warmup:** models load in a background thread on the first call (and via `draft.warmup()`),
-  so the one-time load never blocks the stream. Every path is exception-wrapped — never
-  blank-by-crash, never hang.
+- **Final (`is_final=True`):** **always** the Whisper-Hinglish model (Apple **MPS**) →
+  vocab/repair → strip. It is *not* gated behind the router, so a non-blank faithful final
+  never depends on any other model loading. Fast-model text is only a degradation fallback.
+- **Speculative final (latency):** when the speaker pauses near the end, the Whisper-Hinglish
+  pass is launched in the background *before* `is_final` arrives, so the final returns
+  near-instantly. Fail-safe by construction — never hangs (timeout-bounded lock), never
+  blanks/crashes (synchronous + committed-text fallbacks), never runs two MPS calls at once,
+  never slower than the plain synchronous path. Disable with `STT_SPECULATIVE_FINAL=0`.
+- **Warmup:** models load in a background thread on import / first call (and via
+  `draft.warmup()`), so the one-time load never blocks the stream. Every path is
+  exception-wrapped — never blank-by-crash, never hang.
 
 ## Architecture
 
 ```
 PCM s16le 16k  (cumulative buffer, 20 ms frames)
  → [streaming] faster-whisper-small int8 (CPU) → monotonic stable-prefix partials
- → [is_final]  recall-biased router
-                 → [English]  faster-whisper final
-                 → [Hinglish] Qwen3-ASR 0.6B (Apple MPS, transformers fp16, sdpa)
- → normalize_tech_words()   (canonical tech terms; never touches Devanagari)
+ → [is_final]  Whisper-Hindi2Hinglish (large-v3 finetune, Apple MPS, transformers) — always
+ → normalize_tech_words()   (canonical tech terms: AWS, GPT, Docker, …)
  → repair_common_asr_errors()
  → (text, stable_chars)
 ```
 
 The batch engine [`solution/transcribe.py`](solution/transcribe.py) (`transcribe(wav, mode)`
-+ CLI) is shared by `draft.py` for models and the accuracy pipeline; on a CUDA box it
-auto-uses the vLLM backend, on Apple silicon it uses MPS.
++ CLI) is shared by `draft.py` for models and the accuracy pipeline.
 
 ## Models
 
 | Role | Model | Backend (M1) | License |
 | --- | --- | --- | --- |
 | Fast ASR / partials | `faster-whisper small` (int8) | CTranslate2, CPU | MIT |
-| Hinglish ASR / final | `moorlee/qwen3-asr-0.6b-hinglish` (0.6B) | transformers, Apple MPS, fp16 | Apache-2.0 |
+| Hinglish ASR / final | `Oriserve/Whisper-Hindi2Hinglish-Prime` (large-v3) | transformers, Apple MPS, fp16 | Apache-2.0 |
 
-No ensemble, no romanization, no translation, no large-v3 fallback, no AWQ/GPTQ.
-All permanently disabled. (Qwen on CPU is allowed — fidelity-first — for GPU-less boxes.)
+The Hinglish model is **standard Whisper architecture**, so it loads through the ordinary
+`transformers` ASR pipeline on Apple MPS with no custom code — the reason it runs on the M1
+where the earlier custom-architecture model (qwen3-asr) did not load. Pick the variant via
+`STT_HINGLISH_MODEL`: **Prime** (2B, most faithful) · **Swift** / **Apex** (smaller, faster).
 
 ## Accelerator handling
 
-- **Apple silicon (M1/M2/M3):** Qwen runs on the **MPS** (Metal) backend, fp16, `sdpa`
-  attention. faster-whisper runs CPU int8 (CTranslate2 has no Metal backend).
-- **CUDA box:** the loader auto-selects vLLM (Triton attention) or transformers bf16/FA2.
-- **Pure CPU (no accelerator):** Qwen runs on CPU (fp32/sdpa), **fidelity-first** — the
-  code-switch quality is kept at the cost of a slower final. Set `STT_DISABLE_CPU_QWEN=1`
-  to fall back to faster-whisper-only (fast final, weaker code-switch) instead.
+- **Apple silicon (M1/M2/M3):** Whisper-Hinglish runs on the **MPS** (Metal) backend (fp16),
+  loaded on CPU then moved with `.to("mps")`. faster-whisper partials run CPU int8.
+- **CUDA box:** the same model loads on `cuda:0` (fp16). 
+- **Pure CPU (no accelerator):** runs on CPU (fp32) — slower but functional. Set
+  `STT_DISABLE_CPU_QWEN=1` to skip it and return the fast-model draft instead.
 
 ## Offline Mode
 

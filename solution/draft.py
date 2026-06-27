@@ -196,8 +196,7 @@ def _maybe_speculate(audio: np.ndarray, n: int) -> None:
     global _SPEC_RUNNING
     if not _SPEC_ENABLED or _SPEC_RUNNING:
         return
-    if _STATE.get("escalate") is not True:
-        return
+    # The final always uses the Hinglish model, so speculate on any clip (no escalate gate).
     if (n - _SPEC[0]) < int(_SPEC_MIN_GROWTH_S * TARGET_SR):
         return
     if not _trailing_silence(audio):
@@ -212,39 +211,27 @@ def _maybe_speculate(audio: np.ndarray, n: int) -> None:
 
 
 def _finalize(audio: np.ndarray) -> str:
-    """Best faithful final on the complete buffer — the batch accuracy pipeline."""
+    """Best faithful final on the complete buffer.
+
+    The final ALWAYS runs the Whisper-Hinglish model (standard arch that loads on the M1) —
+    it's never gated behind the faster-whisper router, so a non-blank faithful final does not
+    depend on any other model loading. Fast/committed text is only a degradation fallback."""
     n = int(audio.shape[0])         # samples in the complete buffer (used by the spec-cover check)
-    escalate = _STATE.get("escalate")
     fast_text = ""
     try:
-        # Hinglish was already decided during streaming → skip a redundant fast pass and go
-        # straight to Qwen (lower end-to-final latency). Otherwise run fast once on the full buffer.
-        if escalate is None:
-            fr = _fast_text(audio) or {}
-            fast_text = fr.get("text", "")
-            escalate = bool(fr) and T.should_escalate(
-                fr.get("language", ""), float(fr.get("language_probability", 0.0) or 0.0),
-                float(fr.get("avg_logprob", 0.0) or 0.0),
-                float(fr.get("compression_ratio", 0.0) or 0.0), fast_text)
-        elif not escalate:
-            fr = _fast_text(audio) or {}
-            fast_text = fr.get("text", "")
-
-        hing_text = ""
-        if escalate:
-            _await_warm()   # ensure the (single-shot) Qwen load finished before we use it
-            sl, st = _SPEC  # snapshot the speculative result (atomic tuple read)
-            if _SPEC_ENABLED and st and 0 <= sl <= n and (n - sl) <= int(_SPEC_COVER_S * TARGET_SR):
-                hing_text = st            # pause-time speculation already covers this buffer → instant
-            else:
-                # no usable speculation → run Qwen now (timeout-bounded lock → never hangs;
-                # None means the lock was stuck, so we degrade to the fast/committed text).
-                txt = _qwen_raw(audio, timeout=_QWEN_FINAL_TIMEOUT)
-                hing_text = txt or ""
-            # Qwen unavailable / blank → we skipped the fast pass; run it now on the full
-            # buffer so the final still captures everything (incl. the tail), never blank.
-            if not hing_text.strip() and not fast_text.strip():
-                fast_text = (_fast_text(audio) or {}).get("text", "")
+        _await_warm()   # ensure the (single-shot) Hinglish load finished before we use it
+        # use a fresh pause-time speculation if it covers the buffer (→ instant), else run now
+        sl, st = _SPEC  # snapshot the speculative result (atomic tuple read)
+        if _SPEC_ENABLED and st and 0 <= sl <= n and (n - sl) <= int(_SPEC_COVER_S * TARGET_SR):
+            hing_text = st
+        else:
+            # timeout-bounded lock → never hangs; None means the lock was stuck → degrade.
+            txt = _qwen_raw(audio, timeout=_QWEN_FINAL_TIMEOUT)
+            hing_text = txt or ""
+        # Hinglish unavailable / blank → fall back to the fast model on the full buffer so the
+        # final is never blank (e.g. if the Whisper model failed to load on the box).
+        if not hing_text.strip():
+            fast_text = (_fast_text(audio) or {}).get("text", "")
 
         final = T.finalize_transcript(hing_text, fast_text, "auto", bool(hing_text.strip()))
         if T._vocab is not None:

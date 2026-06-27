@@ -1,7 +1,6 @@
+# local verification artifacts (never commit)
+.hf_cache/
+.venv_verify/
+venv/
 __pycache__/
 *.pyc
-models/
-data/hidden/
-*.wav
-!data/dev/**/*.wav
-!samples/*.wav
