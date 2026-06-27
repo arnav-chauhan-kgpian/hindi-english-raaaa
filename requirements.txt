@@ -7,7 +7,8 @@
 # Versions below match the stack the engine was verified against.
 
 faster-whisper>=1.0          # fast streaming partials (CTranslate2, CPU int8 on Apple silicon)
-transformers>=5.0,<6         # Whisper-Hinglish final via the ASR pipeline (verified on 5.12.1)
+transformers>=4.46,<6        # Whisper-Hinglish via the ASR pipeline (verified 5.12.1; loader is
+                             # version-robust: Auto*→Whisper* class fallback, dtype/torch_dtype fallback)
 torch>=2.2                   # Apple-silicon build ships the MPS (Metal) backend
 accelerate>=1.0              # device placement + low_cpu_mem_usage loading
 safetensors>=0.4.0           # weights format (use_safetensors=True)

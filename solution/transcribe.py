@@ -890,7 +890,15 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
     global _LAST_HINGLISH_ERROR
     try:
         import torch
-        from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+        from transformers import pipeline
+        # Prefer the Auto* classes, but some transformers builds (seen on Kaggle) don't
+        # re-export them at the top level → fall back to the concrete Whisper classes, which
+        # are always importable and exactly what this large-v3 finetune needs.
+        try:
+            from transformers import AutoModelForSpeechSeq2Seq as _ModelCls, AutoProcessor as _ProcCls
+        except Exception:
+            from transformers import WhisperForConditionalGeneration as _ModelCls
+            from transformers import WhisperProcessor as _ProcCls
 
         name = HINGLISH_WHISPER_NAME
         cached, local_path = False, None
@@ -911,9 +919,9 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
         t0 = time.time()
         common = dict(low_cpu_mem_usage=True, use_safetensors=True, **lfo)
         try:                                  # `dtype` (transformers ≥4.56/5.x) …
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(ref, dtype=dtype, **common)
+            model = _ModelCls.from_pretrained(ref, dtype=dtype, **common)
         except TypeError:                     # … `torch_dtype` (older transformers)
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(ref, torch_dtype=dtype, **common)
+            model = _ModelCls.from_pretrained(ref, torch_dtype=dtype, **common)
 
         device = "cuda:0" if on_cuda else ("mps" if on_mps else "cpu")
         try:
@@ -923,7 +931,7 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
             device = "cpu"
             model.to("cpu")
 
-        processor = AutoProcessor.from_pretrained(ref, **lfo)
+        processor = _ProcCls.from_pretrained(ref, **lfo)
         pipe = pipeline(
             "automatic-speech-recognition", model=model,
             tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor,
