@@ -54,12 +54,14 @@ The batch engine [`solution/transcribe.py`](solution/transcribe.py) (`transcribe
 | Role | Model | Backend (M1) | License |
 | --- | --- | --- | --- |
 | Fast ASR / partials | `faster-whisper small` (int8) | CTranslate2, CPU | MIT |
-| Hinglish ASR / final | `Oriserve/Whisper-Hindi2Hinglish-Prime` (large-v3) | transformers, Apple MPS, fp16 | Apache-2.0 |
+| Hinglish ASR / final | `Oriserve/Whisper-Hindi2Hinglish-Apex` (~800M) | transformers, Apple MPS, fp16 | Apache-2.0 |
 
 The Hinglish model is **standard Whisper architecture**, so it loads through the ordinary
 `transformers` ASR pipeline on Apple MPS with no custom code — the reason it runs on the M1
-where the earlier custom-architecture model (qwen3-asr) did not load. Pick the variant via
-`STT_HINGLISH_MODEL`: **Prime** (2B, most faithful) · **Swift** / **Apex** (smaller, faster).
+where the earlier custom-architecture model (qwen3-asr) did not load. Default is **Apex**
+(~800M): on a Kaggle T4 it matched Prime's Hinglish fidelity at ~4× the speed (end-to-final
+0.4–1.2 s vs 1.4–5.1 s). Override via `STT_HINGLISH_MODEL`: **Prime** (large-v3, max fidelity,
+slower) · **Apex** (balanced, default) · **Swift** (72M, fastest, lower fidelity).
 
 ## Accelerator handling
 

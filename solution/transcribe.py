@@ -62,10 +62,12 @@ HINGLISH_WHISPER_ID = "whisper-hindi2hinglish"         # active: standard Whispe
 
 FAST_MODEL_NAME = "small"
 HINGLISH_QWEN_NAME = "moorlee/qwen3-asr-0.6b-hinglish"
-# Hinglish final = a Whisper-large-v3 finetune (standard transformers arch → loads cleanly on
-# Apple MPS, unlike the custom qwen3_asr arch). Configurable so the box can trade latency vs
-# fidelity: Prime (2B, most faithful) | Swift / Apex (smaller, faster). Apache-2.0.
-HINGLISH_WHISPER_NAME = os.environ.get("STT_HINGLISH_MODEL", "Oriserve/Whisper-Hindi2Hinglish-Prime")
+# Hinglish final = a Whisper finetune (standard transformers arch → loads cleanly on Apple
+# MPS, unlike the custom qwen3_asr arch). Default = Apex (~800M): on a Kaggle T4 it matched
+# Prime's (large-v3) Hinglish fidelity while running ~4x faster (end-to-final 0.4–1.2s vs
+# 1.4–5.1s), which keeps it under the latency caps on the slower M1 GPU. Override via env to
+# trade latency vs fidelity: Prime (2B, max fidelity) | Apex (~800M, balanced) | Swift (72M).
+HINGLISH_WHISPER_NAME = os.environ.get("STT_HINGLISH_MODEL", "Oriserve/Whisper-Hindi2Hinglish-Apex")
 
 # Generation cap for Qwen3-ASR. Decode is ~95% of latency and ~linear in tokens; typical
 # dictation clips stop at EOS well under this, so 256 is quality-safe and only bounds

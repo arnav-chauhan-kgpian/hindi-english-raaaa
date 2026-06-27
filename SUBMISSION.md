@@ -14,25 +14,32 @@ in real time via the sealed `stream_server.py` harness; the entry point is
 | `audio_buffer` (cumulative PCM s16le 16k) | decoded `int16 → float32/32768` |
 | Partials / TTFS | faster-whisper-small (CPU int8), debounced ~0.45 s, emitted as `(text, stable_chars)` |
 | `stable_chars` / revision churn | longest common-prefix backed off to a word boundary, **monotonic** (never un-committed) |
-| End-to-final latency | sticky router (Hinglish final → straight to Qwen) + **speculative final**: Qwen is pre-run during the trailing pause so is_final returns near-instantly. Fail-safe: timeout-bounded lock (no hang), synchronous + committed-text fallbacks (no blank), one MPS call at a time, never slower than synchronous. Off via `STT_SPECULATIVE_FINAL=0`. |
-| Meaning & fidelity / critical facts | final = recall router → Qwen3-ASR (MPS) → vocab/repair → Arabic strip |
-| Reliability (no blank/loop/hang) | background model warmup; every path exception-wrapped; anti-runaway gen config |
+| End-to-final latency | the Hinglish (Whisper) final + **speculative final**: it is pre-run during the trailing pause so is_final returns near-instantly. Fail-safe: timeout-bounded lock (no hang), synchronous + committed-text fallbacks (no blank), one MPS call at a time, never slower than synchronous. Off via `STT_SPECULATIVE_FINAL=0`. |
+| Meaning & fidelity / critical facts | final = **always** Whisper-Hinglish (MPS) → vocab/repair → strip; never gated behind the router, so it can't go blank if another model fails |
+| Reliability (no blank/loop/hang) | background model warmup; every path exception-wrapped |
 
 ## Models
 | Role | Model | Backend (M1) | Precision | License |
 | --- | --- | --- | --- | --- |
 | Fast ASR / partials | `faster-whisper small` | CTranslate2 (CPU) | int8 | MIT |
-| Hinglish ASR / final | `moorlee/qwen3-asr-0.6b-hinglish` | transformers (Apple MPS) | fp16 / sdpa | Apache-2.0 |
+| Hinglish ASR / final | `Oriserve/Whisper-Hindi2Hinglish-Apex` (~800M) | transformers (Apple MPS) | fp16 | Apache-2.0 |
+
+The Hinglish model is **standard Whisper architecture** (loads via the ordinary `transformers`
+ASR pipeline — the reason it runs on the M1 where the custom qwen3-asr arch did not). Default
+**Apex**; override with `STT_HINGLISH_MODEL` (Prime = large-v3, max fidelity, slower).
+
+## Verified (Kaggle T4 GPU — proxy for the M1's MPS; load is device-independent)
+- Model **loads + produces faithful romanized Hinglish** (e.g. `…ek prastuti document banaana
+  aur buniyaadi formatting ke is spoken tutorial mein aapka svaagat`).
+- **Apex** streaming end-to-final: **0.39–1.21 s** across the 6 samples (vs Prime 1.4–5.1 s) —
+  Apex matched Prime's fidelity at ~4× the speed, so it's the default to stay under the latency
+  caps on the slower M1 GPU.
 
 ## Backend / accelerator
-- **Apple silicon (scoring box):** Qwen on **MPS** (Metal), fp16, `attn_implementation="sdpa"`.
-  faster-whisper CPU int8 (CTranslate2 has no Metal backend).
-- **CUDA box (portability):** loader auto-selects vLLM (`VLLM_ATTENTION_BACKEND=TRITON_ATTN`)
-  or transformers bf16/FA2. vLLM is not a pinned dependency (CUDA-only).
-- **Pure CPU (e.g. a GPU-less dev box):** Qwen runs on CPU (fp32/sdpa), fidelity-first — the
-  final is slower but the code-switch is kept. `STT_DISABLE_CPU_QWEN=1` reverts to fast-only.
-- Generation: greedy (`num_beams=1`, `do_sample=False`), `max_new_tokens=256`,
-  `no_repeat_ngram_size=3`, `repetition_penalty=1.3` (anti-runaway).
+- **Apple silicon (scoring box):** Whisper-Hinglish on **MPS** (Metal, fp16), loaded on CPU then
+  `.to("mps")`. faster-whisper partials run CPU int8.
+- **CUDA box:** the same model loads on `cuda:0` (fp16) — used for the Kaggle verification.
+- **Pure CPU:** runs fp32 (slower). `STT_DISABLE_CPU_QWEN=1` skips it → fast-model draft only.
 
 ## Reliability / constraints
 - Blank-by-crash: none (every path wrapped; final never blank when any candidate has content).
