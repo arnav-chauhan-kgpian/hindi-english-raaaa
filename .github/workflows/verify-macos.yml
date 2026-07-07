@@ -1,0 +1,67 @@
+name: verify-macos
+
+# Reproduce the OFFICIAL scoring conditions on real Apple silicon (macos-14 = M1):
+#   clone -> pip install -> warm the model cache WITH network -> block network -> run.
+# This is how we catch the "blank/not-READY offline" failure BEFORE resubmitting, since
+# none of us has a local Mac. Metal/MPS may be absent in the CI VM (then it runs CPU) —
+# either way it proves the models load offline and the engine returns non-blank output.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "solution/**"
+      - "requirements.txt"
+      - "preview_stream.py"
+      - ".github/workflows/verify-macos.yml"
+
+jobs:
+  verify:
+    runs-on: macos-14            # Apple silicon (arm64, M-series)
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Machine info
+        run: |
+          uname -a
+          sysctl -n machdep.cpu.brand_string || true
+          python -c "import platform; print('py', platform.python_version(), platform.machine())"
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Accelerator check (MPS?)
+        run: python -c "import torch; print('torch', torch.__version__, '| mps', torch.backends.mps.is_available())"
+
+      - name: Warm the model cache (network AVAILABLE — downloads faster-whisper + Whisper-Hinglish)
+        run: |
+          python - <<'PY'
+          import time, solution.transcribe as T
+          t=time.time(); print('fast model:', T.get_fast_model() is not None)
+          print('hinglish model:', T.get_hinglish_model() is not None, '| err:', T._LAST_HINGLISH_ERROR or 'none')
+          print('warm %.0fs | device=%s' % (time.time()-t, T._HINGLISH_META.get('device')))
+          PY
+
+      - name: Offline STREAMING preview (network blocked in-process) — the scored path
+        run: python preview_stream.py
+
+      - name: Offline batch transcribe of one sample (sanity)
+        run: |
+          python - <<'PY'
+          from offline_guard import block_network
+          from solution.transcribe import transcribe
+          import glob
+          block_network()
+          wav = sorted(glob.glob('samples/*.wav'))[0]
+          r = transcribe(wav, 'auto')
+          print('text:', repr(r.get('text','')))
+          print('model_ids:', r.get('model_ids'), '| local_only:', r.get('local_only'))
+          assert r.get('text','').strip(), 'BLANK OUTPUT OFFLINE — would score 20/100'
+          print('OK: non-blank offline output')
+          PY
