@@ -67,11 +67,10 @@ def _start_warm() -> None:
 
 
 def warmup() -> None:
-    """Optional explicit warmup (load the model before scoring)."""
-    try:
-        T.get_hinglish_model()
-    except Exception:
-        pass
+    """Block until the model has finished loading (join the import-time warm thread). The
+    background thread already owns the single-shot load, so we WAIT for it rather than call
+    the loader again (which would return None mid-load and leave the first clip cold)."""
+    _await_warm()
 
 
 def _await_warm(timeout: float = 180.0) -> None:
@@ -126,8 +125,9 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
             if not is_final and (n - _last_decode_n) < _REDRAFT_SAMPLES:
                 return (_cache or _committed, len(_committed))
 
-            if is_final:
-                _await_warm()                     # the model must be loaded before the final
+            # the model must be loaded before ANY decode — otherwise early partials come back
+            # empty while it loads (cold-start), which would trip the no-useful-partial cap.
+            _await_warm()
 
             text = _transcribe(_decode(audio_buffer))
             _last_decode_n = n
