@@ -48,23 +48,28 @@ jobs:
           assert ok, "model failed to load"
           PY
 
-      - name: Offline STREAMING smoke on one clip (network blocked) — must be non-blank Hinglish
+      - name: Offline STREAMING partials — print every draft to diagnose commit behavior
         run: |
           python - <<'PY'
-          import glob, wave
+          import glob, wave, os
           from offline_guard import block_network
           import solution.draft as D
           D.warmup(); block_network()                       # mirror scoring: no network in the run
-          wav = sorted(glob.glob("samples/*hi_en*.wav") or glob.glob("samples/*.wav"))[0]
-          with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
-          fb = int(0.02 * 16000) * 2                         # 20ms frame; harness drafts every ~500ms
-          useful = None
-          for e in range(fb * 25, len(pcm) + 1, fb * 25):
-              t, sc = D.draft(pcm[:e], False)
-              if useful is None and sc >= 3: useful = (t, sc)
-          final, sc = D.draft(pcm, True)
-          print("first committed partial:", useful)
-          print("FINAL (stable=%d): %r" % (sc, final))
-          assert final.strip(), "BLANK FINAL OFFLINE — would score 20/100"
-          print("OK: non-blank faithful offline final")
+          clips = sorted(glob.glob("samples/*hi_en*.wav"))[:2] + sorted(glob.glob("samples/*en_us*.wav"))[:1]
+          fb = int(0.02 * 16000) * 2                         # 20ms frame
+          for wav in clips:
+              with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
+              D.draft_reset()
+              print("\n==== %s (%.1fs) ====" % (os.path.basename(wav), len(pcm)/2/16000))
+              first_useful = None
+              for e in range(fb * 20, len(pcm) + 1, fb * 20):   # ~400ms feed steps
+                  t, sc = D.draft(pcm[:e], False)
+                  print("  n=%6d stable=%3d | %s" % (e // 2, sc, t))
+                  if first_useful is None and sc >= 3:
+                      first_useful = e // 2 / 16000
+              final, sc = D.draft(pcm, True)
+              print("  FINAL stable=%d | %s" % (sc, final))
+              print("  >> first useful-ish commit at ~%.1fs" % first_useful if first_useful else "  >> NO committed partial")
+              assert final.strip(), "BLANK FINAL OFFLINE — would score 20/100"
+          print("\nOK: finals non-blank; see committed-prefix behavior above")
           PY
