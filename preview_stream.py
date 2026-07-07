@@ -1,69 +1,38 @@
-"""Offline STREAMING preview — mirrors the streaming scoring path.
+"""Local dev preview for the STREAMING dictation track — scores YOUR draft()
+exactly like official admission, fully offline. Analogue of preview.py.
 
-Feeds each clip in samples/ (or data/dev/audio) through solution.draft.draft() in real-time
-20 ms frames with the network hard-blocked, and prints the committed final + end-to-final
-latency per clip. This is the streaming counterpart to preview.py (which runs the batch
-transcribe()). Run AFTER the model cache is warmed once with network available.
+    pip install -r requirements.txt -r requirements-streaming.txt
+    python preview_stream.py            # streams samples/ through solution.stream_server
 
-    python preview_stream.py
+It launches the sealed server (which calls your solution/draft.py), feeds the
+sample clips at 1x real time, and prints the same streaming scorecard the hidden
+set uses. The official run is identical but on hidden clips on a frozen CPU box.
+
+See docs/STREAMING_CONTRACT.md for the contract, scoring, caps, and the published
+RambleFix benchmark line.
 """
 from __future__ import annotations
-
-import glob
+import asyncio
 import os
-import sys
-import time
-import wave
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
-
-from offline_guard import block_network
-from solution import draft as D
-
-SR = 16000
+from evaluator import _evaluate  # noqa: E402
 
 
-def _read(path: str) -> bytes:
-    with wave.open(path, "rb") as w:
-        if w.getframerate() != SR or w.getnchannels() != 1:
-            raise ValueError(f"{path}: need 16 kHz mono, got {w.getframerate()}Hz {w.getnchannels()}ch")
-        return w.readframes(w.getnframes())
-
-
-def main() -> None:
-    clips = sorted(glob.glob(os.path.join(HERE, "samples", "*.wav")))
-    if not clips:
-        clips = sorted(glob.glob(os.path.join(HERE, "data/dev/audio", "*.wav")))
-    if not clips:
-        print("no sample clips found"); return
-
-    D.warmup()          # load models from the warmed cache BEFORE the network is blocked
-    block_network()     # mirror official scoring: no network during the timed run
-
-    frame = int(0.02 * SR) * 2   # 20 ms frame in bytes (PCM s16le)
-    lat, blanks = [], 0
-    for path in clips:
-        try:
-            pcm = _read(path)
-        except Exception as e:
-            print(f"  SKIP {os.path.basename(path)}: {e}"); continue
-        for end in range(frame, len(pcm) + 1, frame * 5):   # ~100 ms feed steps
-            D.draft(pcm[:end], False)
-        t0 = time.time()
-        final, stable = D.draft(pcm, True)
-        ms = (time.time() - t0) * 1000
-        lat.append(ms)
-        if not (final or "").strip():
-            blanks += 1
-        print(f"[end->final {ms:7.0f} ms  stable={stable:4d}] {os.path.basename(path)}\n    {final!r}")
-
-    if lat:
-        lat.sort()
-        p50 = lat[len(lat) // 2]
-        p95 = lat[min(len(lat) - 1, int(0.95 * (len(lat) - 1)))]
-        print(f"\n  clips {len(lat)}  end->final p50 {p50:.0f} ms  p95 {p95:.0f} ms  blanks {blanks}/{len(lat)}")
-        print("  (target: clean final under ~2000 ms; blanks must be 0)")
+def main():
+    manifest = os.path.join(HERE, "samples/manifest.json")
+    res = asyncio.run(_evaluate(manifest, "solution.stream_server", runs=5,
+                                enforce_offline=True))
+    print(f"\n  streaming score   {res['overall_score']}/100")
+    print(f"  meaning {res['meaning_mean']}   WER {res['wer_mean']}   churn {res['churn_mean']}")
+    print(f"  median end-to-final {res['median_end_to_final_ms']}ms   median TTFS {res['median_ttfs_ms']}ms")
+    print(f"  reliability-ok {res['reliability_ok_rate']}   clips capped {res['clips_capped']}/{res['n']}")
+    for c in res["clips"]:
+        flag = f"  capped@{c['capped_at']}" if c["capped_at"] else ""
+        print(f"    {c['clip_id'][:28]:28s} score {c['score']:6}  e2f {c['median_end_to_final_ms']}ms"
+              f"  ttfs {c['median_ttfs_ms']}ms{flag}  {';'.join(c['reasons'][:2])}")
+    print("\n  (sample numbers are illustrative; the hidden set + your latency on the "
+          "frozen CPU box rank you. The starter draft() scores low — that's your start line.)")
 
 
 if __name__ == "__main__":

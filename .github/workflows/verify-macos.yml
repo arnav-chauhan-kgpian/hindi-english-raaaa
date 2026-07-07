@@ -1,10 +1,7 @@
 name: verify-macos
 
-# Reproduce the OFFICIAL scoring conditions on real Apple silicon (macos-14 = M1):
-#   clone -> pip install -> warm the model cache WITH network -> block network -> run.
-# This is how we catch the "blank/not-READY offline" failure BEFORE resubmitting, since
-# none of us has a local Mac. Metal/MPS may be absent in the CI VM (then it runs CPU) —
-# either way it proves the models load offline and the engine returns non-blank output.
+# Reproduce the scoring conditions on real Apple silicon (macos-14 = M1) so we catch the
+# "server not READY / blank offline" failures BEFORE resubmitting — none of us has a local Mac.
 
 on:
   workflow_dispatch:
@@ -12,56 +9,62 @@ on:
     branches: [main]
     paths:
       - "solution/**"
-      - "requirements.txt"
-      - "preview_stream.py"
+      - "requirements*.txt"
       - ".github/workflows/verify-macos.yml"
 
 jobs:
   verify:
     runs-on: macos-14            # Apple silicon (arm64, M-series)
-    timeout-minutes: 45
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
       - name: Machine info
-        run: |
-          uname -a
-          sysctl -n machdep.cpu.brand_string || true
-          python -c "import platform; print('py', platform.python_version(), platform.machine())"
+        run: uname -a; python -c "import platform; print('machine', platform.machine())"
 
-      - name: Install deps
-        run: pip install -r requirements.txt
+      - name: Install deps (batch + streaming)
+        run: pip install -r requirements.txt -r requirements-streaming.txt
 
       - name: Accelerator check (MPS?)
         run: python -c "import torch; print('torch', torch.__version__, '| mps', torch.backends.mps.is_available())"
 
-      - name: Warm the model cache (network AVAILABLE — downloads faster-whisper + Whisper-Hinglish)
+      - name: READY interface — sealed server must import draft + draft_reset
+        run: |
+          python -c "import solution.stream_server as s; assert callable(s.draft) and callable(s.draft_reset); print('OK: stream_server imports draft + draft_reset (server can reach READY)')"
+
+      - name: Wire-protocol contract test (stub draft, no model)
+        run: python tests/test_stream_contract.py
+
+      - name: Warm the model cache (network available — downloads the Whisper-Hinglish model)
         run: |
           python - <<'PY'
           import time, solution.transcribe as T
-          t=time.time(); print('fast model:', T.get_fast_model() is not None)
-          print('hinglish model:', T.get_hinglish_model() is not None, '| err:', T._LAST_HINGLISH_ERROR or 'none')
-          print('warm %.0fs | device=%s' % (time.time()-t, T._HINGLISH_META.get('device')))
+          t = time.time(); ok = T.get_hinglish_model() is not None
+          print("hinglish loaded:", ok, "| device", T._HINGLISH_META.get("device"),
+                "| %.0fs" % (time.time() - t), "| err", T._LAST_HINGLISH_ERROR or "none")
+          assert ok, "model failed to load"
           PY
 
-      - name: Offline STREAMING preview (network blocked in-process) — the scored path
-        run: python preview_stream.py
-
-      - name: Offline batch transcribe of one sample (sanity)
+      - name: Offline STREAMING smoke on one clip (network blocked) — must be non-blank Hinglish
         run: |
           python - <<'PY'
+          import glob, wave
           from offline_guard import block_network
-          from solution.transcribe import transcribe
-          import glob
-          block_network()
-          wav = sorted(glob.glob('samples/*.wav'))[0]
-          r = transcribe(wav, 'auto')
-          print('text:', repr(r.get('text','')))
-          print('model_ids:', r.get('model_ids'), '| local_only:', r.get('local_only'))
-          assert r.get('text','').strip(), 'BLANK OUTPUT OFFLINE — would score 20/100'
-          print('OK: non-blank offline output')
+          import solution.draft as D
+          D.warmup(); block_network()                       # mirror scoring: no network in the run
+          wav = sorted(glob.glob("samples/*hi_en*.wav") or glob.glob("samples/*.wav"))[0]
+          with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
+          fb = int(0.02 * 16000) * 2                         # 20ms frame; harness drafts every ~500ms
+          useful = None
+          for e in range(fb * 25, len(pcm) + 1, fb * 25):
+              t, sc = D.draft(pcm[:e], False)
+              if useful is None and sc >= 3: useful = (t, sc)
+          final, sc = D.draft(pcm, True)
+          print("first committed partial:", useful)
+          print("FINAL (stable=%d): %r" % (sc, final))
+          assert final.strip(), "BLANK FINAL OFFLINE — would score 20/100"
+          print("OK: non-blank faithful offline final")
           PY
