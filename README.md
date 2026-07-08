@@ -21,40 +21,37 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
     # returns      : (text_so_far, stable_chars)  — stable_chars = committed prefix length
 ```
 
-- **Partials (streaming):** faster-whisper-small (CPU int8) on the growing buffer, debounced
-  (~0.45 s). Commit a monotonic word-boundary prefix → fast TTFS, low revision churn.
-- **Final (`is_final=True`):** **always** the Whisper-Hinglish model (Apple **MPS**) →
-  vocab/repair → strip. It is *not* gated behind the router, so a non-blank faithful final
-  never depends on any other model loading. Fast-model text is only a degradation fallback.
-- **Speculative final (latency):** when the speaker pauses near the end, the Whisper-Hinglish
-  pass is launched in the background *before* `is_final` arrives, so the final returns
-  near-instantly. Fail-safe by construction — never hangs (timeout-bounded lock), never
-  blanks/crashes (synchronous + committed-text fallbacks), never runs two MPS calls at once,
-  never slower than the plain synchronous path. Disable with `STT_SPECULATIVE_FINAL=0`.
-- **Warmup:** models load in a background thread on import / first call (and via
-  `draft.warmup()`), so the one-time load never blocks the stream. Every path is
-  exception-wrapped — never blank-by-crash, never hang.
+- **One model for partials AND final:** the same Whisper-Hindi2Hinglish model (Apple **MPS**)
+  transcribes the rolling prefix for the partials and the full buffer for the final — so the
+  committed text is romanized Hinglish that keeps the code-switch, never the English-translated
+  draft. No separate draft model, no draft/finalizer race.
+- **Commit (`stable_chars`):** the longest common word-prefix of consecutive decodes
+  (LocalAgreement-2), monotonic — only ever extended. Low revision churn, faithful partials.
+- **READY / cold-start:** the model warms at import (server reaches READY) and every decode
+  awaits the load, so the first clip's partials aren't empty while it loads.
+- **Reliability:** every path is exception-wrapped; the final falls back to the last good draft
+  and never blanks a committed prefix — no crash, hang, or blank.
 
 ## Architecture
 
 ```
 PCM s16le 16k  (cumulative buffer, 20 ms frames)
- → [streaming] faster-whisper-small int8 (CPU) → monotonic stable-prefix partials
- → [is_final]  Whisper-Hindi2Hinglish (large-v3 finetune, Apple MPS, transformers) — always
- → normalize_tech_words()   (canonical tech terms: AWS, GPT, Docker, …)
- → repair_common_asr_errors()
- → (text, stable_chars)
+ → Whisper-Hindi2Hinglish (Apple MPS, transformers) on the rolling prefix   [partials]
+ → commit longest common word-prefix of consecutive decodes (monotonic)
+ → same model on the full buffer at is_final                                 [final]
+ → (text_so_far, stable_chars)      # romanized Hinglish, code-switch kept
 ```
 
-The batch engine [`solution/transcribe.py`](solution/transcribe.py) (`transcribe(wav, mode)`
-+ CLI) is shared by `draft.py` for models and the accuracy pipeline.
+A separate batch engine [`solution/transcribe.py`](solution/transcribe.py)
+(`transcribe(wav, mode)` + CLI) exists for the batch track (it additionally uses
+faster-whisper for its fast path).
 
 ## Models
 
 | Role | Model | Backend (M1) | License |
 | --- | --- | --- | --- |
-| Fast ASR / partials | `faster-whisper small` (int8) | CTranslate2, CPU | MIT |
-| Hinglish ASR / final | `Oriserve/Whisper-Hindi2Hinglish-Apex` (~800M) | transformers, Apple MPS, fp16 | Apache-2.0 |
+| Streaming partials + final | `Oriserve/Whisper-Hindi2Hinglish-Apex` (~800M) | transformers, Apple MPS, fp16 | Apache-2.0 |
+| Batch entry only (`transcribe.py`) | `faster-whisper small` (int8) | CTranslate2, CPU | MIT |
 
 The Hinglish model is **standard Whisper architecture**, so it loads through the ordinary
 `transformers` ASR pipeline on Apple MPS with no custom code — the reason it runs on the M1
@@ -66,10 +63,9 @@ slower) · **Apex** (balanced, default) · **Swift** (72M, fastest, lower fideli
 ## Accelerator handling
 
 - **Apple silicon (M1/M2/M3):** Whisper-Hinglish runs on the **MPS** (Metal) backend (fp16),
-  loaded on CPU then moved with `.to("mps")`. faster-whisper partials run CPU int8.
-- **CUDA box:** the same model loads on `cuda:0` (fp16). 
-- **Pure CPU (no accelerator):** runs on CPU (fp32) — slower but functional. Set
-  `STT_DISABLE_CPU_QWEN=1` to skip it and return the fast-model draft instead.
+  loaded on CPU then moved with `.to("mps")`; falls back to CPU if MPS is unavailable.
+- **CUDA box:** the same model loads on `cuda:0` (fp16) — used for the earlier Kaggle checks.
+- **Pure CPU (no accelerator):** runs on CPU (fp32) — slower but functional.
 
 ## Offline Mode
 
