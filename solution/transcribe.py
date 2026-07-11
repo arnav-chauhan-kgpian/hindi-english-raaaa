@@ -916,35 +916,40 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
         ref = local_path if (cached and local_path) else name
         lfo = {"local_files_only": True} if cached else {}
 
+        # Match the reference finalizer EXACTLY: build the pipeline directly with
+        # device=mps + float32 (NOT fp16 + .to("mps") — fp16-on-Metal is unreliable and
+        # silently falls to CPU, which is ~15s/decode = "far too slow"). fp16 only on CUDA.
+        import numpy as _np
         on_cuda, on_mps = _cuda_available(), _mps_available()
-        dtype = torch.float16 if (on_cuda or on_mps) else torch.float32
-        t0 = time.time()
-        common = dict(low_cpu_mem_usage=True, use_safetensors=True, **lfo)
-        try:                                  # `dtype` (transformers ≥4.56/5.x) …
-            model = _ModelCls.from_pretrained(ref, dtype=dtype, **common)
-        except TypeError:                     # … `torch_dtype` (older transformers)
-            model = _ModelCls.from_pretrained(ref, torch_dtype=dtype, **common)
-
         device = "cuda:0" if on_cuda else ("mps" if on_mps else "cpu")
-        try:
-            model.to(device)                  # Whisper moves to MPS cleanly (no device_map needed)
-        except Exception as e:                # noqa: BLE001 — any accelerator hiccup → CPU
-            _log(f"move to {device} failed ({type(e).__name__}: {e}); using CPU")
-            device = "cpu"
-            model.to("cpu")
+        dtype = torch.float16 if on_cuda else torch.float32
+        t0 = time.time()
+        mk = dict(use_safetensors=True, low_cpu_mem_usage=True, **lfo)
 
-        processor = _ProcCls.from_pretrained(ref, **lfo)
-        pipe = pipeline(
-            "automatic-speech-recognition", model=model,
-            tokenizer=processor.tokenizer, feature_extractor=processor.feature_extractor,
-            dtype=dtype, device=device, chunk_length_s=30,
-            generate_kwargs={"task": "transcribe", "language": "en"},  # finetune emits Hinglish
-        )
+        def _build(dev, dt):
+            try:
+                return pipeline("automatic-speech-recognition", model=ref, device=dev,
+                                torch_dtype=dt, chunk_length_s=30, model_kwargs=mk,
+                                generate_kwargs={"task": "transcribe", "language": "en"})
+            except TypeError:                 # older transformers: dtype kwarg name
+                return pipeline("automatic-speech-recognition", model=ref, device=dev,
+                                dtype=dt, chunk_length_s=30, model_kwargs=mk,
+                                generate_kwargs={"task": "transcribe", "language": "en"})
+
+        pipe = _build(device, dtype)
+        if device != "cpu":                   # force accelerator init NOW; if Metal is broken
+            try:                              # (e.g. a VM), fall back to CPU cleanly at load time
+                pipe(_np.zeros(1600, dtype=_np.float32))
+            except Exception as e:            # noqa: BLE001
+                _log(f"{device} unusable ({type(e).__name__}: {e}); rebuilding on CPU")
+                device = "cpu"
+                pipe = _build("cpu", torch.float32)
+
         load_ms = round((time.time() - t0) * 1000)
         if meta is not None:
             meta.update(model=name, kind="whisper-hinglish", backend="transformers",
                         device=("cuda" if on_cuda else device),
-                        precision=("fp16" if dtype == torch.float16 else "fp32"),
+                        precision=("fp16" if (on_cuda and device != "cpu") else "fp32"),
                         local_files_only=cached, cached=cached, cache=_hf_cache_dir(),
                         load_ms=load_ms, num_beams=1, do_sample=False)
         _LAST_HINGLISH_ERROR = ""

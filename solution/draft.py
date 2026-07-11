@@ -129,6 +129,13 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
             # empty while it loads (cold-start), which would trip the no-useful-partial cap.
             _await_warm()
 
+            # OVERLAP: if the most recent streaming decode already covers ~all of the audio,
+            # reuse it as the final instead of a fresh full pass → near-instant end-to-final
+            # (the challenge's "overlap decode with the stream instead of waiting for key-up").
+            if is_final and _cache and (n - _last_decode_n) <= int(_SR * 0.6):
+                _committed = _cache
+                return (_cache, len(_cache))
+
             text = _transcribe(_decode(audio_buffer))
             _last_decode_n = n
 
