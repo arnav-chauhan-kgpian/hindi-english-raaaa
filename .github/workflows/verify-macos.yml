@@ -48,28 +48,43 @@ jobs:
           assert ok, "model failed to load"
           PY
 
-      - name: Offline STREAMING partials — print every draft to diagnose commit behavior
+      - name: Does MPS COMPUTE actually work on this runner?
         run: |
           python - <<'PY'
-          import glob, wave, os
-          from offline_guard import block_network
-          import solution.draft as D
-          D.warmup(); block_network()                       # mirror scoring: no network in the run
-          clips = sorted(glob.glob("samples/*hi_en*.wav"))[:2] + sorted(glob.glob("samples/*en_us*.wav"))[:1]
-          fb = int(0.02 * 16000) * 2                         # 20ms frame
-          for wav in clips:
-              with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
-              D.draft_reset()
-              print("\n==== %s (%.1fs) ====" % (os.path.basename(wav), len(pcm)/2/16000))
-              first_useful = None
-              for e in range(fb * 20, len(pcm) + 1, fb * 20):   # ~400ms feed steps
-                  t, sc = D.draft(pcm[:e], False)
-                  print("  n=%6d stable=%3d | %s" % (e // 2, sc, t))
-                  if first_useful is None and sc >= 3:
-                      first_useful = e // 2 / 16000
-              final, sc = D.draft(pcm, True)
-              print("  FINAL stable=%d | %s" % (sc, final))
-              print("  >> first useful-ish commit at ~%.1fs" % first_useful if first_useful else "  >> NO committed partial")
-              assert final.strip(), "BLANK FINAL OFFLINE — would score 20/100"
-          print("\nOK: finals non-blank; see committed-prefix behavior above")
+          import torch, time
+          print("mps available:", torch.backends.mps.is_available())
+          try:
+              a = torch.randn(2048, 2048, device="mps")
+              t = time.time()
+              for _ in range(20):
+                  a = torch.relu(a @ a * 1e-4)
+              if hasattr(torch, "mps"): torch.mps.synchronize()
+              print("MPS matmul OK — 20x2048^3 in %.3fs (GPU works)" % (time.time() - t))
+          except Exception as e:
+              print("MPS compute FAILED -> would fall back to CPU:", type(e).__name__, e)
+          PY
+
+      - name: Decode latency — Apex on mps/float32 vs mps/float16 vs cpu (find the fast path)
+        run: |
+          python - <<'PY'
+          import time, glob, wave
+          import numpy as np, torch
+          from transformers import pipeline
+          wav = sorted(glob.glob("samples/*hi_en*.wav"))[0]
+          with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
+          audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
+          print("clip %.1fs" % (len(audio)/16000))
+          for dev, dt, label in [("mps", torch.float32, "mps/f32 (reference style)"),
+                                 ("mps", torch.float16, "mps/f16 (our current)"),
+                                 ("cpu", torch.float32, "cpu/f32")]:
+              try:
+                  p = pipeline("automatic-speech-recognition",
+                               model="Oriserve/Whisper-Hindi2Hinglish-Apex",
+                               device=dev, torch_dtype=dt, chunk_length_s=30,
+                               generate_kwargs={"task": "transcribe", "language": "en"})
+                  p(audio)                                   # warm
+                  t = time.time(); out = p(audio); ms = (time.time() - t) * 1000
+                  print("  %-26s %7.0f ms | %s" % (label, ms, out["text"][:55]))
+              except Exception as e:
+                  print("  %-26s FAILED: %s: %s" % (label, type(e).__name__, e))
           PY
