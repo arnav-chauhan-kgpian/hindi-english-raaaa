@@ -80,9 +80,10 @@ jobs:
           import asyncio, subprocess, sys, os, time, json, glob, wave
           import websockets
           errf = open("server.err", "w")
+          senv = dict(os.environ, STT_DEBUG="1")   # un-silence _log so the load failure is visible
           proc = subprocess.Popen([sys.executable, "-u", "-m", "solution.stream_server",
                                    "--host", "127.0.0.1", "--port", "8770"],
-                                  stdout=subprocess.PIPE, stderr=errf, text=True)
+                                  stdout=subprocess.PIPE, stderr=errf, text=True, env=senv)
           # wait for READY on stdout
           ready = False
           t0 = time.time()
