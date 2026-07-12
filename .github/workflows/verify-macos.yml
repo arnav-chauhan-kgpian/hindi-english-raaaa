@@ -74,23 +74,56 @@ jobs:
                 "| err:", r.get("err") or T._LAST_HINGLISH_ERROR or "none")
           PY
 
-      - name: Public streaming preview — sealed harness + streaming scorecard (offline)
+      - name: Run the server MANUALLY and capture its stderr (see the real subprocess error)
         run: |
           python - <<'PY'
-          import asyncio, solution.transcribe as T
-          from evaluator import _evaluate
-          print("device:", T._HINGLISH_META.get("device"), "| model:", T.HINGLISH_WHISPER_NAME)
-          res = asyncio.run(_evaluate("samples/manifest.json", "solution.stream_server",
-                                      runs=1, enforce_offline=True))
-          print("\nstreaming score  %.2f/100" % res["overall_score"])
-          print("meaning %.3f  churn %.3f  median e2f %s ms  TTFS %s ms  capped %s/%s" % (
-              res["meaning_mean"], res["churn_mean"], res["median_end_to_final_ms"],
-              res["median_ttfs_ms"], res["clips_capped"], res["n"]))
-          for c in res["clips"]:
-              cap = ("cap@%s" % c["capped_at"]) if c["capped_at"] else ""
-              print("  %-26s score %5s  e2f %s ms  %s %s" % (
-                  c["clip_id"][:26], c["score"], c["median_end_to_final_ms"], cap,
-                  ";".join(c["reasons"][:2])))
-          print("\nNOTE: latency here is CPU/Swift (this VM has no Metal) — NOT the real box.")
-          print("Meaning / churn / caps structure are the transferable signal.")
+          import asyncio, subprocess, sys, os, time, json, glob, wave
+          import websockets
+          errf = open("server.err", "w")
+          proc = subprocess.Popen([sys.executable, "-u", "-m", "solution.stream_server",
+                                   "--host", "127.0.0.1", "--port", "8770"],
+                                  stdout=subprocess.PIPE, stderr=errf, text=True)
+          # wait for READY on stdout
+          ready = False
+          t0 = time.time()
+          while time.time() - t0 < 120:
+              line = proc.stdout.readline()
+              if line:
+                  print("server stdout:", line.strip())
+                  if line.startswith("READY"):
+                      ready = True; break
+              if proc.poll() is not None:
+                  print("server EXITED before READY, code", proc.returncode); break
+          print("READY:", ready)
+
+          async def run():
+              wav = sorted(glob.glob("samples/*hi_en*.wav"))[0]
+              with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
+              async with websockets.connect("ws://127.0.0.1:8770", max_size=None) as ws:
+                  await ws.send(json.dumps({"type": "start", "sample_rate": 16000,
+                                            "format": "pcm_s16le", "channels": 1, "clip_id": "x"}))
+                  fb = 640
+                  for i in range(0, len(pcm), fb):
+                      await ws.send(pcm[i:i+fb]); await asyncio.sleep(0.004)
+                  await ws.send(json.dumps({"type": "end"}))
+                  parts = 0
+                  while True:
+                      m = json.loads(await asyncio.wait_for(ws.recv(), timeout=60))
+                      if m["type"] == "partial":
+                          parts += 1
+                          if parts <= 3 or parts % 10 == 0:
+                              print("partial#%d stable=%s | %s" % (parts, m.get("stable_chars"), m.get("text","")[:70]))
+                      elif m["type"] == "final":
+                          print("FINAL:", repr(m.get("text",""))); print("total partials:", parts); break
+          try:
+              if ready: asyncio.run(run())
+          except Exception as e:
+              print("client error:", type(e).__name__, e)
+          finally:
+              proc.terminate()
+              try: proc.wait(timeout=5)
+              except Exception: proc.kill()
+              errf.close()
+          print("\n===== server.err (last 4000 chars) =====")
+          print(open("server.err").read()[-4000:])
           PY
