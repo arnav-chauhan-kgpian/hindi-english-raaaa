@@ -929,29 +929,29 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
         dtype = torch.float16 if on_cuda else torch.float32
         t0 = time.time()
 
-        pipe = _build(ref, device, dtype, cached)
-        if device != "cpu":                   # force accelerator init NOW; if Metal is broken
-            try:                              # (e.g. a CI VM), fall back to CPU cleanly at load
-                pipe(_np.zeros(1600, dtype=_np.float32))
+        pipe = None
+        # 1) Try the accelerator with the default (Apex) model. Wrap the WHOLE attempt —
+        #    pipeline(device="mps") allocates Metal memory at BUILD time, so a broken GPU
+        #    (e.g. a CI VM) raises here, not just during inference. Any failure → CPU.
+        if device != "cpu":
+            try:
+                pipe = _build(ref, device, dtype, cached)
+                pipe(_np.zeros(1600, dtype=_np.float32))   # force a real decode to confirm it works
             except Exception as e:            # noqa: BLE001
-                _log(f"{device} unusable ({type(e).__name__}: {e}); rebuilding on CPU")
-                device, dtype = "cpu", torch.float32
-                pipe = _build(ref, "cpu", torch.float32, cached)
+                _log(f"{device} unusable ({type(e).__name__}: {e}); using CPU")
+                device, dtype, pipe = "cpu", torch.float32, None
 
-        # Safety net: a heavy model on CPU is ~15s/decode. If we ended up CPU-only with the
-        # default model, drop to the fast Swift variant (~1-2s on CPU) so latency is survivable.
-        # NO effect on an accelerator box (device != "cpu" there → stays Apex, faithful+fast).
-        if (device == "cpu" and not on_cuda
-                and "STT_HINGLISH_MODEL" not in os.environ and "Swift" not in name):
-            sname = "Oriserve/Whisper-Hindi2Hinglish-Swift"
-            sref, scached = _resolve(sname)
-            if scached or _downloads_allowed():
-                try:
-                    pipe = _build(sref, "cpu", torch.float32, scached)
-                    name, cached = sname, scached
+        # 2) CPU path: a heavy model on CPU is ~15s/decode, so use the fast Swift variant
+        #    (whisper-base, ~1-2s) unless the user pinned a model. Build exactly one model.
+        if pipe is None:
+            device, dtype = "cpu", torch.float32
+            if not on_cuda and "STT_HINGLISH_MODEL" not in os.environ and "Swift" not in name:
+                sname = "Oriserve/Whisper-Hindi2Hinglish-Swift"
+                sref, scached = _resolve(sname)
+                if scached or _downloads_allowed():
+                    name, ref, cached = sname, sref, scached
                     _log("CPU-only box — using fast Swift variant for survivable latency")
-                except Exception as e:        # noqa: BLE001 — keep the heavy model on CPU
-                    _log(f"Swift fallback failed ({type(e).__name__}: {e}); keeping {name}")
+            pipe = _build(ref, "cpu", torch.float32, cached)
 
         load_ms = round((time.time() - t0) * 1000)
         if meta is not None:
