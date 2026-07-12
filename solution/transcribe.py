@@ -922,10 +922,11 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
 
         def _build(model_ref, dev, dt, offline):
             # Match the reference finalizer EXACTLY: pipeline(model, device, torch_dtype). Use
-            # float32 on MPS (fp16-on-Metal is unreliable and silently drops to CPU ≈ 15s/decode
-            # = "far too slow"); fp16 only on CUDA.
-            mk = dict(use_safetensors=True, low_cpu_mem_usage=True,
-                      **({"local_files_only": True} if offline else {}))
+            # float32 on MPS (fp16-on-Metal is unreliable and silently drops to CPU ≈ 15s/decode);
+            # fp16 only on CUDA. Do NOT pass local_files_only — pipeline() forwards it to its own
+            # AutoConfig.from_pretrained call too, causing "multiple values for 'local_files_only'".
+            # When cached, model_ref is already the local snapshot PATH → loads offline anyway.
+            mk = dict(use_safetensors=True, low_cpu_mem_usage=True)
             try:
                 return pipeline("automatic-speech-recognition", model=model_ref, device=dev,
                                 torch_dtype=dt, chunk_length_s=30, model_kwargs=mk,
