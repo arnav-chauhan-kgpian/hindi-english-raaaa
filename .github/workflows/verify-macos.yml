@@ -52,6 +52,23 @@ jobs:
           assert ok, "model failed to load"
           PY
 
+      - name: Does the model load in a BACKGROUND thread (as the sealed server does)?
+        run: |
+          python - <<'PY'
+          import threading, time, solution.transcribe as T
+          r = {}
+          def w():
+              try:
+                  h = T.get_hinglish_model()
+                  r["ok"] = h is not None; r["dev"] = T._HINGLISH_META.get("device")
+              except Exception as e:
+                  r["err"] = repr(e)
+          th = threading.Thread(target=w); t0 = time.time(); th.start(); th.join(300)
+          print("alive(after 300s):", th.is_alive(), "| ok:", r.get("ok"),
+                "| device:", r.get("dev"), "| %.0fs" % (time.time() - t0),
+                "| err:", r.get("err") or T._LAST_HINGLISH_ERROR or "none")
+          PY
+
       - name: Public streaming preview — sealed harness + streaming scorecard (offline)
         run: |
           python - <<'PY'
