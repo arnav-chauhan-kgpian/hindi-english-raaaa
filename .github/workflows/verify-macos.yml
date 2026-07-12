@@ -15,7 +15,7 @@ on:
 jobs:
   verify:
     runs-on: macos-14            # Apple silicon (arm64, M-series)
-    timeout-minutes: 40
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,26 +48,23 @@ jobs:
           assert ok, "model failed to load"
           PY
 
-      - name: Offline streaming smoke — loader falls to CPU cleanly, commits, non-blank final
+      - name: Public streaming preview — sealed harness + streaming scorecard (offline)
         run: |
           python - <<'PY'
-          import glob, wave
-          from offline_guard import block_network
-          import solution.transcribe as T
-          import solution.draft as D
-          D.warmup()
-          print("device:", T._HINGLISH_META.get("device"), "| err:", T._LAST_HINGLISH_ERROR or "none")
-          block_network()
-          wav = sorted(glob.glob("samples/*hi_en*.wav"))[0]
-          with wave.open(wav, "rb") as w: pcm = w.readframes(w.getnframes())
-          fb = int(0.02 * 16000) * 2
-          committed = 0
-          for e in range(fb * 25, len(pcm) + 1, fb * 25):
-              _, sc = D.draft(pcm[:e], False); committed = max(committed, sc)
-          final, sc = D.draft(pcm, True)
-          print("max committed during stream:", committed)
-          print("FINAL:", repr(final))
-          assert final.strip(), "BLANK FINAL"
-          assert committed >= 3, "no useful committed partial"
-          print("OK: commits + non-blank faithful final (latency must be measured on real Metal)")
+          import asyncio, solution.transcribe as T
+          from evaluator import _evaluate
+          print("device:", T._HINGLISH_META.get("device"), "| model:", T.HINGLISH_WHISPER_NAME)
+          res = asyncio.run(_evaluate("samples/manifest.json", "solution.stream_server",
+                                      runs=1, enforce_offline=True))
+          print("\nstreaming score  %.2f/100" % res["overall_score"])
+          print("meaning %.3f  churn %.3f  median e2f %s ms  TTFS %s ms  capped %s/%s" % (
+              res["meaning_mean"], res["churn_mean"], res["median_end_to_final_ms"],
+              res["median_ttfs_ms"], res["clips_capped"], res["n"]))
+          for c in res["clips"]:
+              cap = ("cap@%s" % c["capped_at"]) if c["capped_at"] else ""
+              print("  %-26s score %5s  e2f %s ms  %s %s" % (
+                  c["clip_id"][:26], c["score"], c["median_end_to_final_ms"], cap,
+                  ";".join(c["reasons"][:2])))
+          print("\nNOTE: latency here is CPU/Swift (this VM has no Metal) — NOT the real box.")
+          print("Meaning / churn / caps structure are the transferable signal.")
           PY

@@ -893,57 +893,65 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
     try:
         import torch
         from transformers import pipeline
-        # Prefer the Auto* classes, but some transformers builds (seen on Kaggle) don't
-        # re-export them at the top level → fall back to the concrete Whisper classes, which
-        # are always importable and exactly what this large-v3 finetune needs.
-        try:
-            from transformers import AutoModelForSpeechSeq2Seq as _ModelCls, AutoProcessor as _ProcCls
-        except Exception:
-            from transformers import WhisperForConditionalGeneration as _ModelCls
-            from transformers import WhisperProcessor as _ProcCls
+        import numpy as _np
+
+        def _resolve(model_name):
+            # on-disk snapshot path (offline-safe) if cached, else the repo id (downloads once)
+            try:
+                from huggingface_hub import snapshot_download
+                return snapshot_download(model_name, local_files_only=True), True
+            except Exception:
+                return model_name, False
+
+        def _build(model_ref, dev, dt, offline):
+            # Match the reference finalizer EXACTLY: pipeline(model, device, torch_dtype). Use
+            # float32 on MPS (fp16-on-Metal is unreliable and silently drops to CPU ≈ 15s/decode
+            # = "far too slow"); fp16 only on CUDA.
+            mk = dict(use_safetensors=True, low_cpu_mem_usage=True,
+                      **({"local_files_only": True} if offline else {}))
+            try:
+                return pipeline("automatic-speech-recognition", model=model_ref, device=dev,
+                                torch_dtype=dt, chunk_length_s=30, model_kwargs=mk,
+                                generate_kwargs={"task": "transcribe", "language": "en"})
+            except TypeError:                 # older transformers: dtype kwarg name
+                return pipeline("automatic-speech-recognition", model=model_ref, device=dev,
+                                dtype=dt, chunk_length_s=30, model_kwargs=mk,
+                                generate_kwargs={"task": "transcribe", "language": "en"})
 
         name = HINGLISH_WHISPER_NAME
-        cached, local_path = False, None
-        try:                                  # resolve on-disk path → no HF API call when offline
-            from huggingface_hub import snapshot_download
-            local_path = snapshot_download(name, local_files_only=True)
-            cached = True
-        except Exception:
-            cached = False
+        ref, cached = _resolve(name)
         if not cached and not _downloads_allowed():
             _log("Whisper-Hinglish not cached and downloads not allowed — skipping")
             return None
-        ref = local_path if (cached and local_path) else name
-        lfo = {"local_files_only": True} if cached else {}
 
-        # Match the reference finalizer EXACTLY: build the pipeline directly with
-        # device=mps + float32 (NOT fp16 + .to("mps") — fp16-on-Metal is unreliable and
-        # silently falls to CPU, which is ~15s/decode = "far too slow"). fp16 only on CUDA.
-        import numpy as _np
         on_cuda, on_mps = _cuda_available(), _mps_available()
         device = "cuda:0" if on_cuda else ("mps" if on_mps else "cpu")
         dtype = torch.float16 if on_cuda else torch.float32
         t0 = time.time()
-        mk = dict(use_safetensors=True, low_cpu_mem_usage=True, **lfo)
 
-        def _build(dev, dt):
-            try:
-                return pipeline("automatic-speech-recognition", model=ref, device=dev,
-                                torch_dtype=dt, chunk_length_s=30, model_kwargs=mk,
-                                generate_kwargs={"task": "transcribe", "language": "en"})
-            except TypeError:                 # older transformers: dtype kwarg name
-                return pipeline("automatic-speech-recognition", model=ref, device=dev,
-                                dtype=dt, chunk_length_s=30, model_kwargs=mk,
-                                generate_kwargs={"task": "transcribe", "language": "en"})
-
-        pipe = _build(device, dtype)
+        pipe = _build(ref, device, dtype, cached)
         if device != "cpu":                   # force accelerator init NOW; if Metal is broken
-            try:                              # (e.g. a VM), fall back to CPU cleanly at load time
+            try:                              # (e.g. a CI VM), fall back to CPU cleanly at load
                 pipe(_np.zeros(1600, dtype=_np.float32))
             except Exception as e:            # noqa: BLE001
                 _log(f"{device} unusable ({type(e).__name__}: {e}); rebuilding on CPU")
-                device = "cpu"
-                pipe = _build("cpu", torch.float32)
+                device, dtype = "cpu", torch.float32
+                pipe = _build(ref, "cpu", torch.float32, cached)
+
+        # Safety net: a heavy model on CPU is ~15s/decode. If we ended up CPU-only with the
+        # default model, drop to the fast Swift variant (~1-2s on CPU) so latency is survivable.
+        # NO effect on an accelerator box (device != "cpu" there → stays Apex, faithful+fast).
+        if (device == "cpu" and not on_cuda
+                and "STT_HINGLISH_MODEL" not in os.environ and "Swift" not in name):
+            sname = "Oriserve/Whisper-Hindi2Hinglish-Swift"
+            sref, scached = _resolve(sname)
+            if scached or _downloads_allowed():
+                try:
+                    pipe = _build(sref, "cpu", torch.float32, scached)
+                    name, cached = sname, scached
+                    _log("CPU-only box — using fast Swift variant for survivable latency")
+                except Exception as e:        # noqa: BLE001 — keep the heavy model on CPU
+                    _log(f"Swift fallback failed ({type(e).__name__}: {e}); keeping {name}")
 
         load_ms = round((time.time() - t0) * 1000)
         if meta is not None:
