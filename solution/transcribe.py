@@ -31,6 +31,17 @@ import sys
 import time
 from typing import Any, Optional, Union
 
+# Silence progress bars + transformers warnings BEFORE any HF import. The sealed stream
+# server runs behind a captured stdout/stderr pipe that the harness stops draining after
+# READY; the per-decode "Loading weights"/logits-processor spam would otherwise fill that
+# pipe (~64 KB) and DEADLOCK the server → blank finals. Must be set before transformers loads.
+for _k, _v in {
+    "HF_HUB_DISABLE_PROGRESS_BARS": "1", "TQDM_DISABLE": "1",
+    "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1", "TRANSFORMERS_VERBOSITY": "error",
+    "TOKENIZERS_PARALLELISM": "false", "HF_HUB_DISABLE_TELEMETRY": "1",
+}.items():
+    os.environ.setdefault(_k, _v)
+
 # --- model-loading policy -----------------------------------------------------
 # We DO NOT force HF_HUB_OFFLINE=1 here. Forcing it previously blocked the very first
 # download, so the cache stayed empty and every model load returned None forever.
@@ -892,8 +903,14 @@ def _load_whisper_hinglish(meta: Optional[dict] = None) -> Optional[_HinglishHan
     global _LAST_HINGLISH_ERROR
     try:
         import torch
+        import transformers
         from transformers import pipeline
         import numpy as _np
+        try:                                  # kill per-decode warnings (logits processor,
+            transformers.logging.set_verbosity_error()   # chunk_length_s, tokenizer) that would
+            transformers.logging.disable_progress_bar()   # otherwise flood the server's pipe
+        except Exception:
+            pass
 
         def _resolve(model_name):
             # on-disk snapshot path (offline-safe) if cached, else the repo id (downloads once)

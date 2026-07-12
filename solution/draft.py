@@ -16,8 +16,19 @@ blanks (it falls back to the last good draft), so the run never crashes, hangs, 
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
+
+# Silence progress bars / HF chatter before anything imports transformers — the sealed server
+# runs behind a captured pipe the harness stops draining after READY, and that output would
+# otherwise fill the pipe and deadlock the server (→ blank finals).
+for _k, _v in {
+    "HF_HUB_DISABLE_PROGRESS_BARS": "1", "TQDM_DISABLE": "1",
+    "TRANSFORMERS_NO_ADVISORY_WARNINGS": "1", "TRANSFORMERS_VERBOSITY": "error",
+    "TOKENIZERS_PARALLELISM": "false", "HF_HUB_DISABLE_TELEMETRY": "1",
+}.items():
+    os.environ.setdefault(_k, _v)
 
 import numpy as np
 
