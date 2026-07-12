@@ -20,6 +20,11 @@ jobs:
   verify:
     runs-on: macos-14            # Apple silicon (arm64, M-series)
     timeout-minutes: 55
+    # This CI VM has NO usable Metal, so force the fast Swift model to bypass the Apex→OOM→CPU
+    # fallback and learn whether the streaming engine works end-to-end at all. The real box
+    # uses the default (Apex on MPS) — this env only shapes the Metal-less CI.
+    env:
+      STT_HINGLISH_MODEL: Oriserve/Whisper-Hindi2Hinglish-Swift
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
