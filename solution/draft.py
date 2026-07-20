@@ -91,11 +91,19 @@ def _start_warm() -> None:
 def warmup() -> None:
     """Block until the model has finished loading (join the import-time warm thread). The
     background thread already owns the single-shot load, so we WAIT for it rather than call
-    the loader again (which would return None mid-load and leave the first clip cold)."""
-    _await_warm()
+    the loader again (which would return None mid-load and leave the first clip cold).
+    Called outside the timed run, so it may wait as long as the load needs."""
+    _await_warm(600.0)
 
 
-def _await_warm(timeout: float = 180.0) -> None:
+# Bounded wait used INSIDE draft(): a warm-cache load is seconds, so this is ample — but it
+# must never be long enough for the harness to drop the connection (a dropped/hung clip scores
+# 0, worse than any degraded text). If the model still isn't up, we return the committed
+# prefix and keep going.
+_WARM_WAIT_S = 45.0
+
+
+def _await_warm(timeout: float = _WARM_WAIT_S) -> None:
     th = _WARM
     if th is not None and th.is_alive():
         th.join(timeout)

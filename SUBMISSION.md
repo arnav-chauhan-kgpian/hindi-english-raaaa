@@ -13,12 +13,13 @@ the English-translated draft the reference loses points on.
 
 | Contract concern | How `draft.py` handles it |
 | --- | --- |
-| `audio_buffer` (cumulative PCM s16le 16k) | `int16 → float32/32768`; heavy decode debounced (~0.7 s of new audio) |
+| `audio_buffer` (cumulative PCM s16le 16k) | `int16 → float32/32768` |
 | Partials + final | the **same** Whisper-Hinglish model on the rolling prefix / full buffer |
-| `stable_chars` / churn | commit the **longest common word-prefix of consecutive decodes** (LocalAgreement-2); monotonic — the committed prefix is only ever extended |
-| Meaning & fidelity | final = the Whisper-Hinglish transcript (romanized Hinglish, code-switch kept, not translated) |
-| READY / cold-start | model warms at import (server reaches READY); every decode awaits the load, so the first clip's partials aren't empty |
-| Reliability (no blank/loop/hang) | fully exception-wrapped; final falls back to the last good draft; never blanks a committed prefix |
+| **Real-time safety (end-to-final)** | **adaptive duty-cycle throttle**: a new partial decode starts only after 2.5× the *measured* duration of the last one (floor 1 s). Decode time therefore stays well under real time, so the server is never in debt when `end` arrives and the final is a single fresh pass. Without this, re-decoding the whole rolling buffer every ~0.7 s exceeds real time and the final lands late or never. |
+| `stable_chars` / churn | commit the **longest common word-prefix of consecutive decodes** (LocalAgreement-2); monotonic — only ever extended. Measured churn **0.000**. |
+| Meaning & fidelity | final = the Whisper-Hinglish transcript (romanized Hinglish, code-switch kept, not translated) — the same convention as the RambleFix reference finalizer |
+| READY / cold-start | model warms at import (server reaches READY fast); decodes await the load so early partials aren't empty |
+| Reliability (no blank/loop/hang) | fully exception-wrapped; the in-stream warm wait is **bounded (45 s)** so a stalled load degrades to committed text instead of hanging the connection (a dropped clip scores 0); final falls back to the last good draft |
 
 ## Models (declared + licenses)
 | Role | Model | Backend (M1) | License |
