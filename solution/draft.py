@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import threading
+import time
 
 # Silence progress bars / HF chatter before anything imports transformers — the sealed server
 # runs behind a captured pipe the harness stops draining after READY, and that output would
@@ -36,7 +37,13 @@ from solution import transcribe as T  # reuse the offline-robust Whisper-Hinglis
 
 _SR = 16000
 _MIN_AUDIO_BYTES = int(_SR * 0.6) * 2        # ~0.6 s before the first draft (2 bytes/sample)
-_REDRAFT_SAMPLES = int(_SR * 0.7)            # re-run the model after ~0.7 s of new audio
+_MIN_GAP_S = 1.0                             # never re-decode more often than this (wall clock)
+# Duty-cycle cap: each partial decode re-transcribes the whole rolling buffer, so if we decode
+# back-to-back the server falls behind real time and is seconds in debt when `end` arrives →
+# the final lands late or never (that is the "no final / slow" failure). Only start another
+# decode after DUTY x (how long the last one took), keeping decode time well under real time
+# so the server is always current at `end` and the final is a single fresh pass.
+_DUTY = 2.5
 
 # ---- per-clip state (harness calls draft_reset() between clips) ----
 _prev = ""            # previous full draft
@@ -44,17 +51,21 @@ _committed = ""       # committed prefix — only extended within a clip (non-de
 _last_n = 0           # last buffer length in samples (detect a new clip)
 _last_decode_n = -10 ** 9
 _cache = ""           # last successful decode (for debounced returns / final fallback)
+_last_dur = 0.0       # seconds the last decode took (drives the duty-cycle throttle)
+_last_wall = 0.0      # monotonic time the last decode finished
 _lock = threading.Lock()
 
 
 def draft_reset() -> None:
     """Clear per-clip state. Called by the sealed harness at each clip's start."""
-    global _prev, _committed, _last_n, _last_decode_n, _cache
+    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall
     _prev = ""
     _committed = ""
     _last_n = 0
     _last_decode_n = -10 ** 9
     _cache = ""
+    _last_dur = 0.0
+    _last_wall = 0.0
 
 
 # ---- warm the model at import so the sealed server reaches READY promptly; the heavy
@@ -121,7 +132,7 @@ def _common_word_prefix(left: str, right: str) -> str:
 
 
 def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
-    global _prev, _committed, _last_n, _last_decode_n, _cache
+    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall
     with _lock:
         try:
             n = len(audio_buffer) // 2
@@ -132,22 +143,29 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
             if not is_final and len(audio_buffer) < _MIN_AUDIO_BYTES:
                 return (_committed, len(_committed))
 
-            # debounce the heavy model while streaming; always decode on the final
-            if not is_final and (n - _last_decode_n) < _REDRAFT_SAMPLES:
-                return (_cache or _committed, len(_committed))
+            # DUTY-CYCLE THROTTLE (streaming only): only start another partial decode once
+            # DUTY x the last decode's duration has elapsed. This keeps decode time well under
+            # real time so the server is never in debt when `end` arrives — the fix for
+            # "half the run returned no final and the rest were slow".
+            if not is_final:
+                gap = max(_MIN_GAP_S, _DUTY * _last_dur)
+                if (time.monotonic() - _last_wall) < gap:
+                    return (_cache or _committed, len(_committed))
 
             # the model must be loaded before ANY decode — otherwise early partials come back
             # empty while it loads (cold-start), which would trip the no-useful-partial cap.
             _await_warm()
 
             # OVERLAP: if the most recent streaming decode already covers ~all of the audio,
-            # reuse it as the final instead of a fresh full pass → near-instant end-to-final
-            # (the challenge's "overlap decode with the stream instead of waiting for key-up").
+            # reuse it as the final instead of a fresh full pass → near-instant end-to-final.
             if is_final and _cache and (n - _last_decode_n) <= int(_SR * 0.6):
                 _committed = _cache
                 return (_cache, len(_cache))
 
+            _t0 = time.monotonic()
             text = _transcribe(_decode(audio_buffer))
+            _last_dur = time.monotonic() - _t0    # feeds the throttle above
+            _last_wall = time.monotonic()
             _last_decode_n = n
 
             if not text:                          # model not ready / empty decode
