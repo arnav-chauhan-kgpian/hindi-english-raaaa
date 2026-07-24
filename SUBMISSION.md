@@ -15,7 +15,7 @@ the English-translated draft the reference loses points on.
 | --- | --- |
 | `audio_buffer` (cumulative PCM s16le 16k) | `int16 → float32/32768` |
 | Partials + final | the **same** Whisper-Hinglish model on the rolling prefix / full buffer |
-| **Real-time safety (end-to-final)** | **adaptive duty-cycle throttle**: a new partial decode starts only after 2.5× the *measured* duration of the last one (floor 1 s). Decode time therefore stays well under real time, so the server is never in debt when `end` arrives and the final is a single fresh pass. Without this, re-decoding the whole rolling buffer every ~0.7 s exceeds real time and the final lands late or never. |
+| **Real-time safety (end-to-final)** | **adaptive duty-cycle throttle**: a new partial decode starts only after 2.5× the *measured* duration of the last one (floor 1 s), so decode time stays well under real time and the server is never in debt when `end` arrives. **End-of-utterance overlap:** when the tail goes silent (speaker paused) it pre-decodes the full buffer once, so `is_final` reuses it → near-instant end-to-final without dropping words (only silence is skipped). This targets the clips that still hit the time cap. |
 | `stable_chars` / churn | commit the **longest common word-prefix of consecutive decodes** (LocalAgreement-2); monotonic — only ever extended. Measured churn **0.000**. |
 | Meaning & fidelity | final = the Whisper-Hinglish transcript (romanized Hinglish, code-switch kept, not translated) — the same convention as the RambleFix reference finalizer |
 | READY / cold-start | model warms at import (server reaches READY fast); decodes await the load so early partials aren't empty |

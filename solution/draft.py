@@ -45,6 +45,13 @@ _MIN_GAP_S = 1.0                             # never re-decode more often than t
 # so the server is always current at `end` and the final is a single fresh pass.
 _DUTY = 2.5
 
+# End-of-utterance overlap: when the tail goes silent the speaker has (usually) stopped, so we
+# decode the full buffer THEN — before is_final — and reuse it at is_final. That hides the final
+# decode under the natural pause, cutting end-to-final toward ~0 without dropping any words (the
+# only audio skipped at is_final is silence). This targets the clips still hitting the time cap.
+_SILENCE_RMS = 0.012          # tail RMS below this ≈ silence / speaker paused
+_SILENCE_TAIL_S = 0.4         # window checked for the pause
+
 # ---- per-clip state (harness calls draft_reset() between clips) ----
 _prev = ""            # previous full draft
 _committed = ""       # committed prefix — only extended within a clip (non-decreasing)
@@ -53,12 +60,13 @@ _last_decode_n = -10 ** 9
 _cache = ""           # last successful decode (for debounced returns / final fallback)
 _last_dur = 0.0       # seconds the last decode took (drives the duty-cycle throttle)
 _last_wall = 0.0      # monotonic time the last decode finished
+_pause_decoded = False  # already pre-decoded for the current silence → don't re-fire on it
 _lock = threading.Lock()
 
 
 def draft_reset() -> None:
     """Clear per-clip state. Called by the sealed harness at each clip's start."""
-    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall
+    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall, _pause_decoded
     _prev = ""
     _committed = ""
     _last_n = 0
@@ -66,6 +74,7 @@ def draft_reset() -> None:
     _cache = ""
     _last_dur = 0.0
     _last_wall = 0.0
+    _pause_decoded = False
 
 
 # ---- warm the model at import so the sealed server reaches READY promptly; the heavy
@@ -119,6 +128,23 @@ def _decode(buf: bytes) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
 
 
+def _rms_bytes(buf: bytes, start_n: int, end_n: int) -> float:
+    """RMS of the PCM samples in [start_n, end_n) — cheap, on raw bytes. 1.0 (loud) on error."""
+    a, b = max(0, start_n) * 2, end_n * 2
+    if b <= a or b > len(buf):
+        return 1.0
+    try:
+        seg = np.frombuffer(buf[a:b], dtype="<i2").astype(np.float32) / 32768.0
+        return float(np.sqrt(np.mean(seg * seg))) if seg.size else 1.0
+    except Exception:
+        return 1.0
+
+
+def _tail_silent(buf: bytes, n: int) -> bool:
+    k = int(_SILENCE_TAIL_S * _SR)
+    return n >= k and _rms_bytes(buf, n - k, n) < _SILENCE_RMS
+
+
 def _transcribe(audio: np.ndarray) -> str:
     try:
         return (T.hinglish_transcribe(audio).get("text", "") or "").strip()
@@ -140,7 +166,7 @@ def _common_word_prefix(left: str, right: str) -> str:
 
 
 def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
-    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall
+    global _prev, _committed, _last_n, _last_decode_n, _cache, _last_dur, _last_wall, _pause_decoded
     with _lock:
         try:
             n = len(audio_buffer) // 2
@@ -152,21 +178,30 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
                 return (_committed, len(_committed))
 
             # DUTY-CYCLE THROTTLE (streaming only): only start another partial decode once
-            # DUTY x the last decode's duration has elapsed. This keeps decode time well under
-            # real time so the server is never in debt when `end` arrives — the fix for
-            # "half the run returned no final and the rest were slow".
+            # DUTY x the last decode's duration has elapsed — keeps decode time well under real
+            # time so the server is never in debt at `end` ("no final / slow" fix). EXCEPTION:
+            # when the tail just went silent (speaker paused) and there's new audio, decode NOW
+            # to pre-compute the end-of-utterance final and hide it under the pause.
+            tail_sil = _tail_silent(audio_buffer, n) if not is_final else False
             if not is_final:
+                if not tail_sil:
+                    _pause_decoded = False           # speech present again → arm the next pause
+                new_audio = (n - _last_decode_n) >= int(_SR * 0.3)
+                pause = new_audio and tail_sil and not _pause_decoded  # fire once per silence
                 gap = max(_MIN_GAP_S, _DUTY * _last_dur)
-                if (time.monotonic() - _last_wall) < gap:
+                if (time.monotonic() - _last_wall) < gap and not pause:
                     return (_cache or _committed, len(_committed))
 
             # the model must be loaded before ANY decode — otherwise early partials come back
             # empty while it loads (cold-start), which would trip the no-useful-partial cap.
             _await_warm()
 
-            # OVERLAP: if the most recent streaming decode already covers ~all of the audio,
-            # reuse it as the final instead of a fresh full pass → near-instant end-to-final.
-            if is_final and _cache and (n - _last_decode_n) <= int(_SR * 0.6):
+            # OVERLAP: reuse the most recent streaming decode as the final (near-instant
+            # end-to-final) when the audio since that decode is short OR pure silence — i.e. no
+            # spoken words are skipped. The pause pre-decode above makes this the common case.
+            if is_final and _cache and (
+                    (n - _last_decode_n) <= int(_SR * 0.6)
+                    or _rms_bytes(audio_buffer, _last_decode_n, n) < _SILENCE_RMS):
                 _committed = _cache
                 return (_cache, len(_cache))
 
@@ -175,6 +210,8 @@ def draft(audio_buffer: bytes, is_final: bool) -> tuple[str, int]:
             _last_dur = time.monotonic() - _t0    # feeds the throttle above
             _last_wall = time.monotonic()
             _last_decode_n = n
+            if not is_final:
+                _pause_decoded = tail_sil          # decoded on silence → don't re-fire until speech
 
             if not text:                          # model not ready / empty decode
                 fallback = _cache or _committed
